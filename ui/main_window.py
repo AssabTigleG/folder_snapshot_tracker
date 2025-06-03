@@ -3,6 +3,7 @@ import os
 import shutil 
 import subprocess 
 from pathlib import Path 
+import csv # <<<--- ADD THIS IMPORT
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -47,6 +48,10 @@ class MainWindow(QMainWindow):
         settings_action = QAction("&Settings...", self)
         settings_action.triggered.connect(self.open_settings_dialog)
         file_menu.addAction(settings_action)
+
+        export_action = QAction("&Export Report...", self) # <<<--- NEW ACTION
+        export_action.triggered.connect(self.export_report_dialog) # <<<--- CONNECT TO NEW SLOT
+        file_menu.addAction(export_action)
         
         file_menu.addSeparator()
         
@@ -61,6 +66,92 @@ class MainWindow(QMainWindow):
             updated_patterns = dialog.get_updated_patterns()
             self.config_manager.set_ignore_patterns(updated_patterns)
             QMessageBox.information(self, "Settings Saved", "Ignore list updated.")
+
+    def export_report_dialog(self): # <<<--- NEW SLOT FOR EXPORT
+        if self.results_tree.topLevelItemCount() == 0:
+            QMessageBox.information(self, "No Data", "There is no comparison data to export.")
+            return
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Report",
+            "", # Default directory (current or last used)
+            "CSV files (*.csv);;Text files (*.txt);;All Files (*)"
+        )
+
+        if not file_path: # User cancelled
+            return
+
+        try:
+            report_data = []
+            # Iterate through visible items in the tree
+            for i in range(self.results_tree.topLevelItemCount()):
+                category_item = self.results_tree.topLevelItem(i)
+                if category_item.isHidden(): # Skip hidden categories
+                    continue
+                
+                category_name = category_item.text(0) # Status (Added, Modified, Deleted)
+                for j in range(category_item.childCount()):
+                    child_item = category_item.child(j)
+                    if child_item.isHidden(): # Skip hidden items within category
+                        continue
+                    
+                    item_name = child_item.text(1)
+                    relative_path = child_item.text(2)
+                    details = child_item.text(3)
+                    
+                    # Try to get full path for more context
+                    full_path_obj = self._get_full_path_for_tree_item(child_item)
+                    full_path_str = str(full_path_obj) if full_path_obj else "N/A"
+
+                    report_data.append({
+                        "Status": category_name,
+                        "Name": item_name,
+                        "Relative Path": relative_path,
+                        "Full Path": full_path_str,
+                        "Details": details
+                    })
+            
+            if not report_data:
+                QMessageBox.information(self, "No Visible Data", "No visible items in the report to export.")
+                return
+
+            if selected_filter.startswith("CSV files"):
+                self._write_csv_report(file_path, report_data)
+            elif selected_filter.startswith("Text files"):
+                self._write_txt_report(file_path, report_data)
+            else: # Default or "All Files" - try to infer from extension or default to TXT
+                if file_path.lower().endswith(".csv"):
+                    self._write_csv_report(file_path, report_data)
+                else: # Default to TXT if extension is unknown or .txt
+                     if not file_path.lower().endswith(".txt"):
+                        file_path += ".txt" # Ensure .txt extension if not provided
+                     self._write_txt_report(file_path, report_data)
+            
+            QMessageBox.information(self, "Export Successful", f"Report exported to:\n{file_path}")
+            self.status_label.setText(f"Report exported to {Path(file_path).name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Could not export report: {e}")
+            self.status_label.setText(f"Export error: {e}")
+
+    def _write_csv_report(self, file_path: str, data: List[Dict[str, str]]): # <<<--- NEW HELPER
+        if not data: return
+        headers = data[0].keys()
+        with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(data)
+
+    def _write_txt_report(self, file_path: str, data: List[Dict[str, str]]): # <<<--- NEW HELPER
+        with open(file_path, 'w', encoding='utf-8') as txtfile:
+            for item in data:
+                txtfile.write(f"Status: {item['Status']}\n")
+                txtfile.write(f"  Name: {item['Name']}\n")
+                txtfile.write(f"  Relative Path: {item['Relative Path']}\n")
+                txtfile.write(f"  Full Path: {item['Full Path']}\n")
+                txtfile.write(f"  Details: {item['Details']}\n")
+                txtfile.write("-" * 40 + "\n")
 
 
     def init_ui(self):
@@ -129,21 +220,19 @@ class MainWindow(QMainWindow):
         left_panel_layout.addStretch()
         main_layout.addLayout(left_panel_layout, 1) 
 
-        # --- Right Panel: Change Display & Filtering ---
         right_panel_layout = QVBoxLayout() 
         
-        # Filter/Search Controls
         filter_search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by name or path...")
-        self.search_input.textChanged.connect(self.apply_results_filter) # <<<--- CONNECT SEARCH
+        self.search_input.textChanged.connect(self.apply_results_filter) 
         filter_search_layout.addWidget(self.search_input)
 
         self.status_filter_combo = QComboBox()
         self.status_filter_combo.addItems(["All Statuses", "Added", "Modified", "Deleted"])
-        self.status_filter_combo.currentIndexChanged.connect(self.apply_results_filter) # <<<--- CONNECT FILTER
+        self.status_filter_combo.currentIndexChanged.connect(self.apply_results_filter) 
         filter_search_layout.addWidget(self.status_filter_combo)
-        right_panel_layout.addLayout(filter_search_layout) # <<<--- ADD TO RIGHT PANEL
+        right_panel_layout.addLayout(filter_search_layout) 
 
 
         self.results_tree = QTreeWidget()
@@ -155,7 +244,7 @@ class MainWindow(QMainWindow):
         right_panel_layout.addWidget(self.results_tree)
         main_layout.addLayout(right_panel_layout, 3)
 
-    def apply_results_filter(self): # <<<--- NEW METHOD FOR FILTERING
+    def apply_results_filter(self): 
         search_term = self.search_input.text().lower()
         status_filter = self.status_filter_combo.currentText()
 
@@ -163,33 +252,31 @@ class MainWindow(QMainWindow):
             category_item = self.results_tree.topLevelItem(i)
             if not category_item: continue
 
-            category_name = category_item.text(0) # "Added", "Modified", "Deleted"
+            category_name = category_item.text(0) 
             category_visible = False
 
-            # Filter category itself if status filter is specific
             if status_filter != "All Statuses" and category_name != status_filter:
                 category_item.setHidden(True)
-                continue # No need to check children if category itself is filtered out
+                continue 
 
-            # Iterate through children of this category
             for j in range(category_item.childCount()):
                 child_item = category_item.child(j)
                 if not child_item: continue
 
-                item_name = child_item.text(1).lower() # Column 1 is Name
-                item_rel_path = child_item.text(2).lower() # Column 2 is Relative Path
+                item_name = child_item.text(1).lower() 
+                item_rel_path = child_item.text(2).lower() 
                 
                 matches_search = (search_term in item_name) or \
                                  (search_term in item_rel_path)
                 
                 if matches_search:
                     child_item.setHidden(False)
-                    category_visible = True # If any child is visible, category should be visible
+                    category_visible = True 
                 else:
                     child_item.setHidden(True)
             
             category_item.setHidden(not category_visible)
-            if category_visible: # Ensure expansion if it became visible
+            if category_visible: 
                 category_item.setExpanded(True)
 
 
@@ -525,7 +612,7 @@ class MainWindow(QMainWindow):
 
             self.results_tree.expandItem(cat_item)
         
-        self.apply_results_filter() # Apply current filter after populating
+        self.apply_results_filter() 
         
         for i in range(self.results_tree.columnCount()):
             self.results_tree.resizeColumnToContents(i)
