@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QComboBox, QFileDialog, QMessageBox, QTreeWidget,
     QTreeWidgetItem, QLineEdit, QLabel, QProgressBar, QAbstractItemView,
-    QMenuBar
+    QMenuBar, QCheckBox # <<<--- ADD QCheckBox
 )
 from PyQt6.QtCore import Qt, QUrl 
 from PyQt6.QtGui import QAction 
@@ -24,8 +24,8 @@ class MainWindow(QMainWindow):
         self.db_manager = DatabaseManager()
         self.config_manager = ConfigManager() 
         self.selected_folders_for_snapshot = []
-        self.snapshot_worker: SnapshotWorker = None # Type hinting for clarity
-        self.comparison_worker: ComparisonWorker = None # Type hinting
+        self.snapshot_worker: Optional[SnapshotWorker] = None # Type hinting
+        self.comparison_worker: Optional[ComparisonWorker] = None # Type hinting
 
         self._create_menu_bar() 
         self.init_ui()
@@ -60,70 +60,74 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
 
         # Left Panel: Folder Selection & Snapshot Actions
-        left_panel = QVBoxLayout()
+        left_panel_layout = QVBoxLayout() # Changed name for clarity
         
         self.folder_list_widget = QListWidget()
-        left_panel.addWidget(QLabel("Folders to Snapshot:"))
-        left_panel.addWidget(self.folder_list_widget)
+        left_panel_layout.addWidget(QLabel("Folders to Snapshot:"))
+        left_panel_layout.addWidget(self.folder_list_widget)
 
         add_folder_button = QPushButton("Add Folder") 
         add_folder_button.clicked.connect(self.add_folder) 
-        left_panel.addWidget(add_folder_button)
+        left_panel_layout.addWidget(add_folder_button)
 
         remove_folder_button = QPushButton("Remove Selected Folder")
         remove_folder_button.clicked.connect(self.remove_selected_folders)
-        left_panel.addWidget(remove_folder_button)
+        left_panel_layout.addWidget(remove_folder_button)
 
         clear_folders_button = QPushButton("Clear All Folders")
         clear_folders_button.clicked.connect(self.clear_all_folders)
-        left_panel.addWidget(clear_folders_button)
+        left_panel_layout.addWidget(clear_folders_button)
 
         self.snapshot_name_input = QLineEdit()
         self.snapshot_name_input.setPlaceholderText("Optional: Snapshot Name (auto-generated if empty)")
-        left_panel.addWidget(QLabel("Snapshot Name:"))
-        left_panel.addWidget(self.snapshot_name_input)
+        left_panel_layout.addWidget(QLabel("Snapshot Name:"))
+        left_panel_layout.addWidget(self.snapshot_name_input)
 
         create_snapshot_button = QPushButton("Create Snapshot")
         create_snapshot_button.clicked.connect(self.create_snapshot)
-        left_panel.addWidget(create_snapshot_button)
+        left_panel_layout.addWidget(create_snapshot_button)
         
-        left_panel.addSpacing(20)
+        left_panel_layout.addSpacing(20)
 
+        left_panel_layout.addWidget(QLabel("Select Snapshot to Compare/Delete:"))
         self.snapshots_combo = QComboBox()
-        left_panel.addWidget(QLabel("Select Snapshot to Compare/Delete:"))
-        left_panel.addWidget(self.snapshots_combo)
+        left_panel_layout.addWidget(self.snapshots_combo)
+
+        # --- Quick Compare Checkbox ---
+        self.quick_compare_checkbox = QCheckBox("Quick Compare (Size/Date Only)") # <<<--- NEW WIDGET
+        left_panel_layout.addWidget(self.quick_compare_checkbox) # <<<--- ADD TO LAYOUT
 
         compare_button = QPushButton("Compare with Current State")
         compare_button.clicked.connect(self.compare_snapshot)
-        left_panel.addWidget(compare_button)
+        left_panel_layout.addWidget(compare_button)
         
         delete_snapshot_button = QPushButton("Delete Selected Snapshot")
         delete_snapshot_button.clicked.connect(self.delete_snapshot)
-        left_panel.addWidget(delete_snapshot_button)
+        left_panel_layout.addWidget(delete_snapshot_button)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        left_panel.addWidget(self.progress_bar)
+        left_panel_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
-        left_panel.addWidget(self.status_label)
+        left_panel_layout.addWidget(self.status_label)
 
         self.cancel_button = QPushButton("Cancel Operation")
         self.cancel_button.clicked.connect(self.cancel_current_operation)
         self.cancel_button.setVisible(False)
-        left_panel.addWidget(self.cancel_button)
+        left_panel_layout.addWidget(self.cancel_button)
 
-        left_panel.addStretch()
-        main_layout.addLayout(left_panel, 1) 
+        left_panel_layout.addStretch()
+        main_layout.addLayout(left_panel_layout, 1) 
 
         # Right Panel: Change Display
-        right_panel = QVBoxLayout()
+        right_panel_layout = QVBoxLayout() # Changed name for clarity
         self.results_tree = QTreeWidget()
         self.results_tree.setColumnCount(4) 
-        self.results_tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details (Size/LMT/Hash)"])
-        right_panel.addWidget(QLabel("Comparison Results:"))
-        right_panel.addWidget(self.results_tree)
-        main_layout.addLayout(right_panel, 3)
+        self.results_tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details"]) # Simplified header
+        right_panel_layout.addWidget(QLabel("Comparison Results:"))
+        right_panel_layout.addWidget(self.results_tree)
+        main_layout.addLayout(right_panel_layout, 3)
 
     def add_folder(self): 
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder to Monitor")
@@ -146,17 +150,21 @@ class MainWindow(QMainWindow):
         self.folder_list_widget.clear()
 
     def load_snapshots_into_combo(self):
+        current_snapshot_id = self.snapshots_combo.currentData()
         self.snapshots_combo.clear()
         snapshots = self.db_manager.get_all_snapshots()
         if not snapshots:
             self.snapshots_combo.addItem("No snapshots available", -1)
             return
-        for snap in snapshots:
+        for idx, snap in enumerate(snapshots):
             self.snapshots_combo.addItem(f"{snap['name']} ({snap['timestamp']})", snap['id'])
+            if snap['id'] == current_snapshot_id:
+                self.snapshots_combo.setCurrentIndex(idx)
+
 
     def cancel_current_operation(self):
         self.status_label.setText("Cancellation requested...")
-        self.cancel_button.setEnabled(False) # Prevent multiple clicks
+        self.cancel_button.setEnabled(False) 
         if self.snapshot_worker and self.snapshot_worker.isRunning():
             self.snapshot_worker.request_cancellation()
         elif self.comparison_worker and self.comparison_worker.isRunning():
@@ -179,11 +187,11 @@ class MainWindow(QMainWindow):
         ignore_patterns = self.config_manager.get_ignore_patterns()
         
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0,0) # Indeterminate initially
+        self.progress_bar.setRange(0,0) 
         self.cancel_button.setVisible(True)
         self.cancel_button.setEnabled(True)
         self.status_label.setText("Starting snapshot creation...")
-        self.set_ui_for_operation(True) # Disable most UI
+        self.set_ui_for_operation(True)
 
         self.snapshot_worker = SnapshotWorker(
             list(self.selected_folders_for_snapshot), 
@@ -193,7 +201,7 @@ class MainWindow(QMainWindow):
         self.snapshot_worker.progress_updated.connect(self.update_progress)
         self.snapshot_worker.snapshot_complete.connect(self.on_snapshot_complete)
         self.snapshot_worker.snapshot_error.connect(self.on_operation_error)
-        self.snapshot_worker.finished.connect(self.on_worker_finished) # Generic finished signal
+        self.snapshot_worker.finished.connect(self.on_worker_finished)
         self.snapshot_worker.start()
 
     def compare_snapshot(self):
@@ -207,20 +215,21 @@ class MainWindow(QMainWindow):
             return
 
         ignore_patterns = self.config_manager.get_ignore_patterns() 
+        is_quick_compare = self.quick_compare_checkbox.isChecked() # <<<--- GET QUICK COMPARE STATE
 
         self.results_tree.clear()
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0,0) 
         self.cancel_button.setVisible(True)
         self.cancel_button.setEnabled(True)
-        self.status_label.setText("Starting comparison...")
-        self.set_ui_for_operation(True) # Disable most UI
+        self.status_label.setText(f"Starting comparison{' (Quick Mode)' if is_quick_compare else ''}...")
+        self.set_ui_for_operation(True)
 
-        self.comparison_worker = ComparisonWorker(snapshot_id, ignore_patterns)
+        self.comparison_worker = ComparisonWorker(snapshot_id, ignore_patterns, is_quick_compare) # <<<--- PASS FLAG
         self.comparison_worker.comparison_progress.connect(self.update_progress)
         self.comparison_worker.comparison_complete.connect(self.on_comparison_complete)
         self.comparison_worker.comparison_error.connect(self.on_operation_error)
-        self.comparison_worker.finished.connect(self.on_worker_finished) # Generic finished signal
+        self.comparison_worker.finished.connect(self.on_worker_finished) 
         self.comparison_worker.start()
 
     def delete_snapshot(self):
@@ -241,13 +250,13 @@ class MainWindow(QMainWindow):
             self.results_tree.clear() 
 
     def update_progress(self, current, total, message):
-        if total > 0 and current <= total : # Determinate
+        if total > 0 and current <= total : 
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(current)
-        elif total == 0 and current == 0: # Special case for indeterminate from worker
+        elif total == 0 and current == 0: 
             self.progress_bar.setRange(0,0)
-        else: # Could be just a message update, or estimation phase
-            self.progress_bar.setRange(0,0) # Fallback to indeterminate
+        else: 
+            self.progress_bar.setRange(0,0) 
         self.status_label.setText(message)
 
     def on_snapshot_complete(self, snapshot_id, name):
@@ -255,12 +264,12 @@ class MainWindow(QMainWindow):
         self.load_snapshots_into_combo()
         self.snapshot_name_input.clear() 
         QMessageBox.information(self, "Snapshot Complete", f"Snapshot '{name}' created.")
-        # UI re-enabling will be handled by on_worker_finished
 
     def on_comparison_complete(self, results: Dict[str, List]):
-        self.status_label.setText("Comparison complete.")
+        is_quick_mode = self.quick_compare_checkbox.isChecked() # Check again for display purposes
+        self.status_label.setText(f"Comparison complete{' (Quick Mode)' if is_quick_mode else ''}.")
         self.results_tree.clear()
-        # ... (Tree population logic as before - I'll keep it concise here for brevity)
+        
         categories = {
             "Added": results.get('added', []), "Deleted": results.get('deleted', []),
             "Modified": results.get('modified', []) 
@@ -268,7 +277,6 @@ class MainWindow(QMainWindow):
         for cat_name, items in categories.items():
             cat_item = QTreeWidgetItem(self.results_tree, [cat_name, f"({len(items)} items)"])
             for item_data in items:
-                # ... (Detailed item display logic from previous version) ...
                 display_name = ""
                 display_rel_path = ""
                 display_details_list = []
@@ -286,47 +294,53 @@ class MainWindow(QMainWindow):
                             display_details_list.append(f"Size: {old_item_info.get('size', 'N/A')} -> {new_item_info.get('size', 'N/A')}")
                         if new_item_info.get('lmt') != old_item_info.get('lmt'):
                             display_details_list.append(f"LMT changed")
-                        oh = old_item_info.get('content_hash', 'N/A')
-                        nh = new_item_info.get('content_hash', 'N/A')
-                        if oh != nh:
-                             display_details_list.append(f"Hash: {str(oh)[:8]}... -> {str(nh)[:8]}...")
+                        
+                        if not is_quick_mode: # Only show hash details if not quick mode
+                            oh = old_item_info.get('content_hash', 'N/A')
+                            nh = new_item_info.get('content_hash', 'N/A')
+                            if oh != nh and not (str(oh).startswith("ERROR") and str(nh).startswith("ERROR")): # Avoid showing if both error
+                                 display_details_list.append(f"Hash: {str(oh)[:8]}... -> {str(nh)[:8]}...")
+                        else:
+                            display_details_list.append("(Quick Compare)")
                     else: 
                         display_details_list.append("Folder metadata/content changed")
-                else: 
+                else: # Added or Deleted
                     display_name = item_data['item_name']
                     display_rel_path = item_data['relative_path']
                     if item_data['is_file']:
                         display_details_list.append(f"Size: {item_data.get('size', 'N/A')}")
-                        h = item_data.get('content_hash', 'N/A')
-                        if h and not str(h).startswith("ERROR") and h != "CANCELLED_HASH_LIVE":
-                            display_details_list.append(f"Hash: {str(h)[:8]}...")
-                        elif h:
-                             display_details_list.append(f"Hash: {h}")
+                        if not is_quick_mode or cat_name == "Deleted": # Deleted items always show stored hash
+                            h = item_data.get('content_hash', 'N/A')
+                            if h and not str(h).startswith("ERROR") and h != "NOT_HASHED_QUICK_COMPARE" and h != "CANCELLED_HASH_LIVE":
+                                display_details_list.append(f"Hash: {str(h)[:8]}...")
+                            elif h == "NOT_HASHED_QUICK_COMPARE" and is_quick_mode and cat_name == "Added":
+                                display_details_list.append("Hash: (Quick Compare)")
+                            elif h: # Show error/cancelled hash
+                                 display_details_list.append(f"Hash: {h}")
+                        elif is_quick_mode and cat_name == "Added":
+                             display_details_list.append("Hash: (Quick Compare)")
+
+
                 details_str = "; ".join(display_details_list) if display_details_list else "N/A"
                 QTreeWidgetItem(cat_item, ["", display_name, display_rel_path, details_str])
             self.results_tree.expandItem(cat_item)
         for i in range(self.results_tree.columnCount()):
             self.results_tree.resizeColumnToContents(i)
-        # UI re-enabling will be handled by on_worker_finished
 
     def on_operation_error(self, error_message):
-        # This will be displayed, and then on_worker_finished will re-enable UI
-        if "cancelled" in error_message.lower():
-             self.status_label.setText(f"Operation Cancelled: {error_message.replace('Operation cancelled: ', '').replace('Operation cancelled', '')}")
-             QMessageBox.information(self, "Operation Cancelled", error_message)
+        if "cancelled" in error_message.lower() or "cancel requested" in error_message.lower():
+             self.status_label.setText(f"Operation Cancelled.")
+             # QMessageBox.information(self, "Operation Cancelled", error_message) # Can be noisy
         else:
             self.status_label.setText(f"Error: {error_message}")
             QMessageBox.critical(self, "Operation Error", error_message)
-        # UI re-enabling will be handled by on_worker_finished
 
     def on_worker_finished(self):
-        """Generic slot called when either worker's QThread.finished signal is emitted."""
         self.progress_bar.setVisible(False)
         self.cancel_button.setVisible(False)
-        self.cancel_button.setEnabled(True) # Re-enable for next operation
-        self.set_ui_for_operation(False) # Re-enable UI
+        self.cancel_button.setEnabled(True) 
+        self.set_ui_for_operation(False) 
 
-        # Clear worker references
         if self.sender() == self.snapshot_worker:
             self.snapshot_worker = None
         elif self.sender() == self.comparison_worker:
@@ -334,26 +348,25 @@ class MainWindow(QMainWindow):
 
 
     def set_ui_for_operation(self, is_running: bool):
-        """Disables/Enables UI elements during long operations."""
         enabled = not is_running
-        # Disable all buttons except the cancel button if an operation is running
-        for button in self.findChildren(QPushButton):
-            if button == self.cancel_button:
-                button.setVisible(is_running) # Show/hide cancel button
-                button.setEnabled(is_running) # Enable cancel button only when running
-            else:
-                button.setEnabled(enabled)
-        
-        self.folder_list_widget.setEnabled(enabled)
-        self.snapshots_combo.setEnabled(enabled)
-        self.snapshot_name_input.setEnabled(enabled)
+        for child_widget in self.findChildren(QWidget):
+            if isinstance(child_widget, QPushButton) or \
+               isinstance(child_widget, QListWidget) or \
+               isinstance(child_widget, QComboBox) or \
+               isinstance(child_widget, QLineEdit) or \
+               isinstance(child_widget, QCheckBox): # Include checkbox
+                if child_widget == self.cancel_button:
+                    child_widget.setVisible(is_running) 
+                    child_widget.setEnabled(is_running) 
+                else:
+                    child_widget.setEnabled(enabled)
         self.menuBar().setEnabled(enabled)
 
 
     def closeEvent(self, event):
         if self.snapshot_worker and self.snapshot_worker.isRunning():
             self.snapshot_worker.request_cancellation()
-            self.snapshot_worker.wait(1000) # Give some time to finish/cancel
+            self.snapshot_worker.wait(1000) 
         if self.comparison_worker and self.comparison_worker.isRunning():
             self.comparison_worker.request_cancellation()
             self.comparison_worker.wait(1000)
