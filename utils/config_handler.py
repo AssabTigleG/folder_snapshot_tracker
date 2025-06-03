@@ -6,12 +6,12 @@ from typing import List, Dict
 CONFIG_FILE_NAME = "app_config.json"
 DEFAULT_IGNORE_PATTERNS = [
     "*.pyc",
-    "__pycache__/",
+    "__pycache__",  
     ".DS_Store",
     "Thumbs.db",
-    ".git/",
-    ".vscode/",
-    "node_modules/" 
+    ".git",         
+    ".vscode",      
+    "node_modules"  
 ]
 
 class ConfigManager:
@@ -26,7 +26,7 @@ class ConfigManager:
                     return json.load(f)
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Error loading config file {self.config_file}: {e}. Using defaults.")
-        return {"ignore_patterns": DEFAULT_IGNORE_PATTERNS} # Default config
+        return {"ignore_patterns": DEFAULT_IGNORE_PATTERNS}
 
     def save_config(self):
         try:
