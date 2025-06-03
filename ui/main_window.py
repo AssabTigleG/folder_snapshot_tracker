@@ -2,14 +2,18 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QComboBox, QFileDialog, QMessageBox, QTreeWidget,
-    QTreeWidgetItem, QInputDialog, QLineEdit, QLabel, QProgressBar, QAbstractItemView
+    QTreeWidgetItem, QInputDialog, QLineEdit, QLabel, QProgressBar, QAbstractItemView,
+    QMenuBar
 )
-from PyQt6.QtCore import Qt, QUrl # Added QUrl if we were to use getExistingDirectoryUrls
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction
 from typing import Dict, List 
 
 from core.db_manager import DatabaseManager
 from core.snapshot_manager import SnapshotWorker
 from core.comparison_engine import ComparisonWorker
+from utils.config_handler import ConfigManager
+from ui.ignore_list_dialog import IgnoreListDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -18,12 +22,37 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)
 
         self.db_manager = DatabaseManager()
+        self.config_manager = ConfigManager()
         self.selected_folders_for_snapshot = []
         self.snapshot_worker = None
         self.comparison_worker = None
 
+        self._create_menu_bar()
         self.init_ui()
         self.load_snapshots_into_combo()
+    
+    def _create_menu_bar(self):
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+
+        settings_action = QAction("&Settings...", self)
+        settings_action.triggered.connect(self.open_settings_dialog)
+        file_menu.addAction(settings_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("&Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+    def open_settings_dialog(self):
+        current_patterns = self.config_manager.get_ignore_patterns()
+        dialog = IgnoreListDialog(current_patterns, self)
+        if dialog.exec(): # exec() is blocking and returns QDialog.DialogCode.Accepted or Rejected
+            updated_patterns = dialog.get_updated_patterns()
+            self.config_manager.set_ignore_patterns(updated_patterns)
+            QMessageBox.information(self, "Settings Saved", "Ignore list updated.")
+
 
     def init_ui(self):
         central_widget = QWidget()
@@ -135,8 +164,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0,0) 
         self.status_label.setText("Starting snapshot creation...")
         self.set_ui_enabled(False)
-
-        self.snapshot_worker = SnapshotWorker(list(self.selected_folders_for_snapshot), snapshot_name) 
+        
+        ignore_patterns = self.config_manager.get_ignore_patterns()
+        self.snapshot_worker = SnapshotWorker(list(self.selected_folders_for_snapshot), snapshot_name, ignore_patterns) 
         self.snapshot_worker.progress_updated.connect(self.update_progress)
         self.snapshot_worker.snapshot_complete.connect(self.on_snapshot_complete)
         self.snapshot_worker.snapshot_error.connect(self.on_operation_error)
@@ -158,7 +188,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Starting comparison...")
         self.set_ui_enabled(False)
 
-        self.comparison_worker = ComparisonWorker(snapshot_id)
+        ignore_patterns = self.config_manager.get_ignore_patterns()
+        self.comparison_worker = ComparisonWorker(snapshot_id, ignore_patterns)
         self.comparison_worker.comparison_progress.connect(self.update_progress)
         self.comparison_worker.comparison_complete.connect(self.on_comparison_complete)
         self.comparison_worker.comparison_error.connect(self.on_operation_error)

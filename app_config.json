@@ -1,0 +1,12 @@
+{
+    "ignore_patterns": [
+        "*.pyc",
+        "__pycache__/",
+        ".DS_Store",
+        "Thumbs.db",
+        ".vscode/",
+        "node_modules/",
+        "yahoo",
+        ".git"
+    ]
+}

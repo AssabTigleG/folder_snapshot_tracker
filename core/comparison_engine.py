@@ -1,9 +1,10 @@
 # core/comparison_engine.py
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple # <<<--- ADD THIS LINE
+from typing import List, Dict, Any, Optional, Tuple
 from PyQt6.QtCore import QThread, pyqtSignal
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import fnmatch
 
 from utils.hashing_utils import calculate_sha256_for_file
 from core.db_manager import DatabaseManager
@@ -13,10 +14,17 @@ class ComparisonWorker(QThread):
     comparison_complete = pyqtSignal(dict) # {'added': [], 'deleted': [], 'modified': []}
     comparison_error = pyqtSignal(str)
 
-    def __init__(self, snapshot_id_to_compare: int):
+    def __init__(self, snapshot_id_to_compare: int, ignore_patterns: Optional[List[str]] = None):
         super().__init__()
         self.snapshot_id = snapshot_id_to_compare
         self.db_manager = DatabaseManager()
+        self.ignore_patterns = ignore_patterns or []
+
+    def _is_ignored(self, name: str, path: Path) -> bool:
+        for pattern in self.ignore_patterns:
+            if fnmatch.fnmatch(name, pattern):
+                return True
+        return False
 
     def _scan_live_folder_state(self, root_folders_paths_str: List[str]) -> List[Dict[str, Any]]:
         """Scans the current state of root_folders, similar to snapshot creation but in-memory."""
@@ -38,29 +46,44 @@ class ComparisonWorker(QThread):
                 self.comparison_progress.emit(processed_files_count, total_files_to_scan, f"Warning: Root path {root_folder_path} is not a directory. Skipping for live scan.")
                 continue
             
-            for dirpath, dirnames, filenames in os.walk(root_folder_path):
+            # Use a list for dirnames to allow modification
+            for dirpath, dirnames_orig, filenames in os.walk(root_folder_path, topdown=True):
+                dirnames = list(dirnames_orig)
+
+                # Filter directories
+                for i in range(len(dirnames) - 1, -1, -1):
+                    dirname = dirnames[i]
+                    dir_full_path = Path(dirpath) / dirname
+                    if self._is_ignored(dirname, dir_full_path.relative_to(root_folder_path)):
+                        self.comparison_progress.emit(processed_files_count, total_files_to_scan, f"Ignoring dir (live): {dirname}")
+                        del dirnames[i]
+                        del dirnames_orig[i]
+
                 current_dir_path = Path(dirpath)
-                for dirname in dirnames:
+                for dirname in dirnames: # Non-ignored dirs
                     full_path = current_dir_path / dirname
                     relative_path = full_path.relative_to(root_folder_path).as_posix()
                     try:
                         stat_info = full_path.stat(follow_symlinks=False)
                         live_items.append({
-                            'root_folder_idx': root_idx,
-                            'relative_path': relative_path,
-                            'item_name': dirname,
-                            'is_file': False,
-                            'size': None,
-                            'lmt': stat_info.st_mtime,
-                            'ct': stat_info.st_ctime,
-                            'content_hash': None
+                            'root_folder_idx': root_idx, 'relative_path': relative_path,
+                            'item_name': dirname, 'is_file': False, 'size': None,
+                            'lmt': stat_info.st_mtime, 'ct': stat_info.st_ctime, 'content_hash': None
                         })
                     except OSError: pass 
 
                 for filename in filenames:
                     full_path = current_dir_path / filename
-                    if full_path.is_symlink(): # Skip symlinks
+                    if self._is_ignored(filename, full_path.relative_to(root_folder_path)):
+                        self.comparison_progress.emit(processed_files_count, total_files_to_scan, f"Ignoring file (live): {filename}")
+                        total_files_to_scan -=1
+                        if total_files_to_scan < 0: total_files_to_scan = 0
+                        continue
+
+                    if full_path.is_symlink(): 
                         self.comparison_progress.emit(processed_files_count, total_files_to_scan, f"Skipping symlink (live): {full_path}")
+                        total_files_to_scan -=1
+                        if total_files_to_scan < 0: total_files_to_scan = 0
                         continue
                     relative_path = full_path.relative_to(root_folder_path).as_posix()
                     files_to_hash_map[str(full_path)] = (root_idx, relative_path, filename)

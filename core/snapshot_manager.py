@@ -3,22 +3,37 @@ import os
 from pathlib import Path
 import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Dict, Any, Optional # <<<--- ADD THIS LINE
+from typing import List, Dict, Any, Optional 
 from PyQt6.QtCore import QThread, pyqtSignal
+import fnmatch
 
 from utils.hashing_utils import calculate_sha256_for_file
 from core.db_manager import DatabaseManager
 
 class SnapshotWorker(QThread):
-    progress_updated = pyqtSignal(int, int, str)  # current, total, message
-    snapshot_complete = pyqtSignal(int, str) # snapshot_id, name
+    progress_updated = pyqtSignal(int, int, str)  
+    snapshot_complete = pyqtSignal(int, str) 
     snapshot_error = pyqtSignal(str)
 
-    def __init__(self, root_folders: List[str], snapshot_name: Optional[str] = None):
+    def __init__(self, root_folders: List[str], snapshot_name: Optional[str] = None, ignore_patterns: Optional[List[str]] = None):
         super().__init__()
         self.root_folders = [Path(p) for p in root_folders]
         self.snapshot_name = snapshot_name or f"Snapshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.db_manager = DatabaseManager()
+        self.ignore_patterns = ignore_patterns or []
+    
+    def _is_ignored(self, name: str, path: Path) -> bool:
+        # Check against name first (e.g. ".git", "node_modules")
+        for pattern in self.ignore_patterns:
+            if fnmatch.fnmatch(name, pattern):
+                return True
+        # Check against full relative path if pattern ends with / (indicating directory pattern)
+        # This is a simple heuristic; more robust pattern matching might be needed for complex cases
+        # For now, we mostly rely on name matching for dirs and files.
+        # A pattern like "some_dir/" will match a directory named "some_dir".
+        # A pattern like "*.log" will match any file ending in .log.
+        return False
+
 
     def run(self):
         try:
@@ -39,35 +54,50 @@ class SnapshotWorker(QThread):
                     self.progress_updated.emit(processed_files_count, total_files_to_scan, f"Warning: Root path {root_folder_path} is not a directory or not accessible. Skipping.")
                     continue
 
-                for dirpath, dirnames, filenames in os.walk(root_folder_path):
+                # Use a list for dirnames to allow modification for skipping
+                for dirpath, dirnames_orig, filenames in os.walk(root_folder_path, topdown=True):
+                    dirnames = list(dirnames_orig) # Make a mutable copy
+
+                    # Filter directories to ignore
+                    # Iterate in reverse to safely remove items from dirnames
+                    for i in range(len(dirnames) - 1, -1, -1):
+                        dirname = dirnames[i]
+                        dir_full_path = Path(dirpath) / dirname
+                        if self._is_ignored(dirname, dir_full_path.relative_to(root_folder_path)):
+                            self.progress_updated.emit(processed_files_count, total_files_to_scan, f"Ignoring dir: {dirname}")
+                            del dirnames[i] # Don't descend into this directory
+                            del dirnames_orig[i] # Also modify the original list os.walk uses
+
                     current_dir_path = Path(dirpath)
-                    # Add directories
-                    for dirname in dirnames:
-                        # Add ignore list logic here if implementing
+                    # Add (non-ignored) directories found at this level
+                    for dirname in dirnames: # These are the ones not filtered out
                         full_path = current_dir_path / dirname
                         relative_path = full_path.relative_to(root_folder_path).as_posix()
                         try:
-                            stat_info = full_path.stat(follow_symlinks=False) # Don't follow symlinks for stat
+                            stat_info = full_path.stat(follow_symlinks=False)
                             snapshot_items_for_db.append({
                                 'root_folder_idx': root_idx,
                                 'relative_path': relative_path,
                                 'item_name': dirname,
-                                'is_file': False,
-                                'size': None,
-                                'lmt': stat_info.st_mtime,
-                                'ct': stat_info.st_ctime,
-                                'content_hash': None
+                                'is_file': False, 'size': None, 'lmt': stat_info.st_mtime,
+                                'ct': stat_info.st_ctime, 'content_hash': None
                             })
                         except OSError as e:
                             self.progress_updated.emit(processed_files_count, total_files_to_scan, f"Error stating dir {full_path}: {e}")
 
-
-                    # Prepare files for hashing
+                    # Prepare (non-ignored) files for hashing
                     for filename in filenames:
-                        # Add ignore list logic here if implementing
                         full_path = current_dir_path / filename
-                        if full_path.is_symlink(): # Skip symlinks by default, or handle as per design
+                        if self._is_ignored(filename, full_path.relative_to(root_folder_path)):
+                            self.progress_updated.emit(processed_files_count, total_files_to_scan, f"Ignoring file: {filename}")
+                            total_files_to_scan -=1 # Adjust total if we skip before counting for progress
+                            if total_files_to_scan < 0: total_files_to_scan = 0
+                            continue # Skip this file
+
+                        if full_path.is_symlink():
                              self.progress_updated.emit(processed_files_count, total_files_to_scan, f"Skipping symlink: {full_path}")
+                             total_files_to_scan -=1
+                             if total_files_to_scan < 0: total_files_to_scan = 0
                              continue
                         relative_path = full_path.relative_to(root_folder_path).as_posix()
                         files_to_hash_map[str(full_path)] = (root_idx, relative_path, filename)
