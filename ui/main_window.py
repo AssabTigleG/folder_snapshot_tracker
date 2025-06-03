@@ -118,7 +118,7 @@ class MainWindow(QMainWindow):
         left_panel_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
-        self.status_label.setWordWrap(True) # <<<--- ENABLE WORD WRAP
+        self.status_label.setWordWrap(True) 
         left_panel_layout.addWidget(self.status_label)
 
         self.cancel_button = QPushButton("Cancel Operation")
@@ -129,7 +129,23 @@ class MainWindow(QMainWindow):
         left_panel_layout.addStretch()
         main_layout.addLayout(left_panel_layout, 1) 
 
+        # --- Right Panel: Change Display & Filtering ---
         right_panel_layout = QVBoxLayout() 
+        
+        # Filter/Search Controls
+        filter_search_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search by name or path...")
+        self.search_input.textChanged.connect(self.apply_results_filter) # <<<--- CONNECT SEARCH
+        filter_search_layout.addWidget(self.search_input)
+
+        self.status_filter_combo = QComboBox()
+        self.status_filter_combo.addItems(["All Statuses", "Added", "Modified", "Deleted"])
+        self.status_filter_combo.currentIndexChanged.connect(self.apply_results_filter) # <<<--- CONNECT FILTER
+        filter_search_layout.addWidget(self.status_filter_combo)
+        right_panel_layout.addLayout(filter_search_layout) # <<<--- ADD TO RIGHT PANEL
+
+
         self.results_tree = QTreeWidget()
         self.results_tree.setColumnCount(4) 
         self.results_tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details"]) 
@@ -138,6 +154,44 @@ class MainWindow(QMainWindow):
         right_panel_layout.addWidget(QLabel("Comparison Results:"))
         right_panel_layout.addWidget(self.results_tree)
         main_layout.addLayout(right_panel_layout, 3)
+
+    def apply_results_filter(self): # <<<--- NEW METHOD FOR FILTERING
+        search_term = self.search_input.text().lower()
+        status_filter = self.status_filter_combo.currentText()
+
+        for i in range(self.results_tree.topLevelItemCount()):
+            category_item = self.results_tree.topLevelItem(i)
+            if not category_item: continue
+
+            category_name = category_item.text(0) # "Added", "Modified", "Deleted"
+            category_visible = False
+
+            # Filter category itself if status filter is specific
+            if status_filter != "All Statuses" and category_name != status_filter:
+                category_item.setHidden(True)
+                continue # No need to check children if category itself is filtered out
+
+            # Iterate through children of this category
+            for j in range(category_item.childCount()):
+                child_item = category_item.child(j)
+                if not child_item: continue
+
+                item_name = child_item.text(1).lower() # Column 1 is Name
+                item_rel_path = child_item.text(2).lower() # Column 2 is Relative Path
+                
+                matches_search = (search_term in item_name) or \
+                                 (search_term in item_rel_path)
+                
+                if matches_search:
+                    child_item.setHidden(False)
+                    category_visible = True # If any child is visible, category should be visible
+                else:
+                    child_item.setHidden(True)
+            
+            category_item.setHidden(not category_visible)
+            if category_visible: # Ensure expansion if it became visible
+                category_item.setExpanded(True)
+
 
     def on_selected_snapshot_changed(self, index: int): 
         snapshot_id = self.snapshots_combo.itemData(index)
@@ -470,6 +524,9 @@ class MainWindow(QMainWindow):
 
 
             self.results_tree.expandItem(cat_item)
+        
+        self.apply_results_filter() # Apply current filter after populating
+        
         for i in range(self.results_tree.columnCount()):
             self.results_tree.resizeColumnToContents(i)
 
