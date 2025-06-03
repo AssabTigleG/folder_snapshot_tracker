@@ -1,13 +1,18 @@
 # ui/main_window.py
+import os 
+import shutil 
+import subprocess 
+from pathlib import Path 
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QComboBox, QFileDialog, QMessageBox, QTreeWidget,
     QTreeWidgetItem, QLineEdit, QLabel, QProgressBar, QAbstractItemView,
-    QMenuBar, QCheckBox # <<<--- ADD QCheckBox
+    QMenuBar, QCheckBox, QMenu 
 )
-from PyQt6.QtCore import Qt, QUrl 
-from PyQt6.QtGui import QAction 
-from typing import Dict, List 
+from PyQt6.QtCore import Qt, QUrl, QPoint 
+from PyQt6.QtGui import QAction, QGuiApplication 
+from typing import Dict, List, Optional 
 
 from core.db_manager import DatabaseManager
 from core.snapshot_manager import SnapshotWorker
@@ -16,6 +21,9 @@ from utils.config_handler import ConfigManager
 from ui.ignore_list_dialog import IgnoreListDialog 
 
 class MainWindow(QMainWindow):
+    ITEM_TYPE_ROLE = Qt.ItemDataRole.UserRole + 1 
+    ITEM_DATA_ROLE = Qt.ItemDataRole.UserRole + 2 
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Folder Snapshot & Change Tracker")
@@ -24,8 +32,9 @@ class MainWindow(QMainWindow):
         self.db_manager = DatabaseManager()
         self.config_manager = ConfigManager() 
         self.selected_folders_for_snapshot = []
-        self.snapshot_worker: Optional[SnapshotWorker] = None # Type hinting
-        self.comparison_worker: Optional[ComparisonWorker] = None # Type hinting
+        self.snapshot_worker: Optional[SnapshotWorker] = None
+        self.comparison_worker: Optional[ComparisonWorker] = None
+        self.current_snapshot_root_folders: List[str] = [] 
 
         self._create_menu_bar() 
         self.init_ui()
@@ -59,8 +68,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # Left Panel: Folder Selection & Snapshot Actions
-        left_panel_layout = QVBoxLayout() # Changed name for clarity
+        left_panel_layout = QVBoxLayout()
         
         self.folder_list_widget = QListWidget()
         left_panel_layout.addWidget(QLabel("Folders to Snapshot:"))
@@ -91,11 +99,11 @@ class MainWindow(QMainWindow):
 
         left_panel_layout.addWidget(QLabel("Select Snapshot to Compare/Delete:"))
         self.snapshots_combo = QComboBox()
+        self.snapshots_combo.currentIndexChanged.connect(self.on_selected_snapshot_changed) 
         left_panel_layout.addWidget(self.snapshots_combo)
 
-        # --- Quick Compare Checkbox ---
-        self.quick_compare_checkbox = QCheckBox("Quick Compare (Size/Date Only)") # <<<--- NEW WIDGET
-        left_panel_layout.addWidget(self.quick_compare_checkbox) # <<<--- ADD TO LAYOUT
+        self.quick_compare_checkbox = QCheckBox("Quick Compare (Size/Date Only)") 
+        left_panel_layout.addWidget(self.quick_compare_checkbox) 
 
         compare_button = QPushButton("Compare with Current State")
         compare_button.clicked.connect(self.compare_snapshot)
@@ -110,6 +118,7 @@ class MainWindow(QMainWindow):
         left_panel_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
+        self.status_label.setWordWrap(True) # <<<--- ENABLE WORD WRAP
         left_panel_layout.addWidget(self.status_label)
 
         self.cancel_button = QPushButton("Cancel Operation")
@@ -120,14 +129,132 @@ class MainWindow(QMainWindow):
         left_panel_layout.addStretch()
         main_layout.addLayout(left_panel_layout, 1) 
 
-        # Right Panel: Change Display
-        right_panel_layout = QVBoxLayout() # Changed name for clarity
+        right_panel_layout = QVBoxLayout() 
         self.results_tree = QTreeWidget()
         self.results_tree.setColumnCount(4) 
-        self.results_tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details"]) # Simplified header
+        self.results_tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details"]) 
+        self.results_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu) 
+        self.results_tree.customContextMenuRequested.connect(self.show_results_tree_context_menu) 
         right_panel_layout.addWidget(QLabel("Comparison Results:"))
         right_panel_layout.addWidget(self.results_tree)
         main_layout.addLayout(right_panel_layout, 3)
+
+    def on_selected_snapshot_changed(self, index: int): 
+        snapshot_id = self.snapshots_combo.itemData(index)
+        if snapshot_id and snapshot_id != -1:
+            all_snapshots = self.db_manager.get_all_snapshots() 
+            target_snapshot_info = next((s for s in all_snapshots if s['id'] == snapshot_id), None)
+            if target_snapshot_info:
+                self.current_snapshot_root_folders = target_snapshot_info.get('root_folders', [])
+            else:
+                self.current_snapshot_root_folders = []
+        else:
+            self.current_snapshot_root_folders = []
+
+
+    def _get_full_path_for_tree_item(self, item: QTreeWidgetItem) -> Optional[Path]: 
+        item_data = item.data(0, self.ITEM_DATA_ROLE) 
+        item_type = item.data(0, self.ITEM_TYPE_ROLE)
+
+        if not item_data or item_type == 'category':
+            return None
+
+        actual_item_info = item_data
+        if 'new' in item_data and 'old' in item_data: 
+            actual_item_info = item_data['new'] 
+            parent_text = item.parent().text(0) if item.parent() else ""
+            if parent_text == "Deleted": 
+                 actual_item_info = item_data['old']
+
+
+        root_folder_idx = actual_item_info.get('root_folder_idx')
+        relative_path_str = actual_item_info.get('relative_path')
+
+        if root_folder_idx is not None and relative_path_str is not None and \
+           self.current_snapshot_root_folders and 0 <= root_folder_idx < len(self.current_snapshot_root_folders):
+            base_path = Path(self.current_snapshot_root_folders[root_folder_idx])
+            return base_path / relative_path_str
+        return None
+
+    def show_results_tree_context_menu(self, position: QPoint): 
+        item = self.results_tree.itemAt(position)
+        if not item:
+            return
+
+        item_type = item.data(0, self.ITEM_TYPE_ROLE)
+        if item_type == 'category': 
+            return
+
+        full_path = self._get_full_path_for_tree_item(item)
+        
+        parent_text = item.parent().text(0) if item.parent() else ""
+        item_exists_on_disk = (parent_text == "Added" or parent_text == "Modified") and full_path and full_path.exists()
+        item_was_file = True 
+        item_data_dict = item.data(0, self.ITEM_DATA_ROLE)
+        if item_data_dict:
+            check_item = item_data_dict
+            if 'new' in item_data_dict: check_item = item_data_dict['new'] 
+            elif parent_text == "Deleted": check_item = item_data_dict 
+            item_was_file = check_item.get('is_file', True)
+
+
+        menu = QMenu(self)
+
+        if full_path:
+            copy_path_action = QAction("Copy Full Path", self)
+            copy_path_action.triggered.connect(lambda: self.copy_item_path(full_path))
+            menu.addAction(copy_path_action)
+
+            if item_exists_on_disk or parent_text == "Deleted": 
+                open_folder_action = QAction("Open Containing Folder", self)
+                path_to_open_parent = full_path.parent if (item_exists_on_disk and item_was_file) or parent_text == "Deleted" else full_path
+                open_folder_action.triggered.connect(lambda: self.open_item_location(path_to_open_parent))
+                menu.addAction(open_folder_action)
+
+            if item_exists_on_disk and item_was_file:
+                open_file_action = QAction("Open File", self)
+                open_file_action.triggered.connect(lambda: self.open_item_location(full_path))
+                menu.addAction(open_file_action)
+        
+        if menu.actions(): 
+            menu.exec(self.results_tree.mapToGlobal(position))
+
+    def copy_item_path(self, path: Path): 
+        if path:
+            QGuiApplication.clipboard().setText(str(path))
+            self.status_label.setText(f"Path copied: {path}")
+
+    def open_item_location(self, path: Path): 
+        if not path:
+            self.status_label.setText("Cannot open: Path is invalid.")
+            return
+        try:
+            if os.name == 'nt': 
+                if path.exists():
+                    os.startfile(str(path)) 
+                else:
+                    parent_dir = path.parent
+                    if parent_dir.exists():
+                        os.startfile(str(parent_dir))
+                    else:
+                        QMessageBox.warning(self, "Cannot Open", f"Path or its parent does not exist: {path}")
+            elif os.name == 'posix': 
+                if path.is_dir() and path.exists():
+                    subprocess.run(['xdg-open', str(path)], check=False)
+                elif path.exists(): 
+                     subprocess.run(['xdg-open', str(path)], check=False)
+                else: 
+                    parent_dir = path.parent
+                    if parent_dir.exists() and parent_dir.is_dir():
+                         subprocess.run(['xdg-open', str(parent_dir)], check=False)
+                    else:
+                        QMessageBox.warning(self, "Cannot Open", f"Path or its parent does not exist: {path}")
+            else:
+                QMessageBox.information(self, "Not Supported", "Opening files/folders is not directly supported on this OS via this app.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error Opening", f"Could not open '{path}': {e}")
+            self.status_label.setText(f"Error opening: {e}")
+
 
     def add_folder(self): 
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder to Monitor")
@@ -150,16 +277,26 @@ class MainWindow(QMainWindow):
         self.folder_list_widget.clear()
 
     def load_snapshots_into_combo(self):
-        current_snapshot_id = self.snapshots_combo.currentData()
+        current_snapshot_id_data = self.snapshots_combo.currentData()
         self.snapshots_combo.clear()
         snapshots = self.db_manager.get_all_snapshots()
         if not snapshots:
             self.snapshots_combo.addItem("No snapshots available", -1)
+            self.current_snapshot_root_folders = [] 
             return
+        
+        selected_index_to_restore = -1
         for idx, snap in enumerate(snapshots):
             self.snapshots_combo.addItem(f"{snap['name']} ({snap['timestamp']})", snap['id'])
-            if snap['id'] == current_snapshot_id:
-                self.snapshots_combo.setCurrentIndex(idx)
+            if snap['id'] == current_snapshot_id_data:
+                selected_index_to_restore = idx
+        
+        if selected_index_to_restore != -1:
+            self.snapshots_combo.setCurrentIndex(selected_index_to_restore)
+        elif snapshots: 
+             self.snapshots_combo.setCurrentIndex(0)
+        
+        self.on_selected_snapshot_changed(self.snapshots_combo.currentIndex()) 
 
 
     def cancel_current_operation(self):
@@ -213,9 +350,12 @@ class MainWindow(QMainWindow):
         if self.comparison_worker and self.comparison_worker.isRunning():
             QMessageBox.information(self, "Busy", "A comparison operation is already in progress.")
             return
+        
+        self.on_selected_snapshot_changed(self.snapshots_combo.currentIndex())
+
 
         ignore_patterns = self.config_manager.get_ignore_patterns() 
-        is_quick_compare = self.quick_compare_checkbox.isChecked() # <<<--- GET QUICK COMPARE STATE
+        is_quick_compare = self.quick_compare_checkbox.isChecked() 
 
         self.results_tree.clear()
         self.progress_bar.setVisible(True)
@@ -225,7 +365,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Starting comparison{' (Quick Mode)' if is_quick_compare else ''}...")
         self.set_ui_for_operation(True)
 
-        self.comparison_worker = ComparisonWorker(snapshot_id, ignore_patterns, is_quick_compare) # <<<--- PASS FLAG
+        self.comparison_worker = ComparisonWorker(snapshot_id, ignore_patterns, is_quick_compare) 
         self.comparison_worker.comparison_progress.connect(self.update_progress)
         self.comparison_worker.comparison_complete.connect(self.on_comparison_complete)
         self.comparison_worker.comparison_error.connect(self.on_operation_error)
@@ -266,7 +406,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Snapshot Complete", f"Snapshot '{name}' created.")
 
     def on_comparison_complete(self, results: Dict[str, List]):
-        is_quick_mode = self.quick_compare_checkbox.isChecked() # Check again for display purposes
+        is_quick_mode = self.quick_compare_checkbox.isChecked() 
         self.status_label.setText(f"Comparison complete{' (Quick Mode)' if is_quick_mode else ''}.")
         self.results_tree.clear()
         
@@ -276,16 +416,22 @@ class MainWindow(QMainWindow):
         }
         for cat_name, items in categories.items():
             cat_item = QTreeWidgetItem(self.results_tree, [cat_name, f"({len(items)} items)"])
-            for item_data in items:
+            cat_item.setData(0, self.ITEM_TYPE_ROLE, 'category') 
+
+            for item_data_raw in items:
+                item_dict_for_role = item_data_raw
+
                 display_name = ""
                 display_rel_path = ""
                 display_details_list = []
+                is_file_for_role = True 
 
                 if cat_name == "Modified":
-                    new_item_info = item_data['new']
-                    old_item_info = item_data['old']
+                    new_item_info = item_data_raw['new']
+                    old_item_info = item_data_raw['old']
                     display_name = new_item_info['item_name']
                     display_rel_path = new_item_info['relative_path']
+                    is_file_for_role = new_item_info.get('is_file', True)
                     
                     if new_item_info['is_file'] != old_item_info['is_file']:
                         display_details_list.append(f"Type changed (File<->Folder)")
@@ -294,35 +440,35 @@ class MainWindow(QMainWindow):
                             display_details_list.append(f"Size: {old_item_info.get('size', 'N/A')} -> {new_item_info.get('size', 'N/A')}")
                         if new_item_info.get('lmt') != old_item_info.get('lmt'):
                             display_details_list.append(f"LMT changed")
-                        
-                        if not is_quick_mode: # Only show hash details if not quick mode
+                        if not is_quick_mode: 
                             oh = old_item_info.get('content_hash', 'N/A')
                             nh = new_item_info.get('content_hash', 'N/A')
-                            if oh != nh and not (str(oh).startswith("ERROR") and str(nh).startswith("ERROR")): # Avoid showing if both error
+                            if oh != nh and not (str(oh).startswith("ERROR") and str(nh).startswith("ERROR")):
                                  display_details_list.append(f"Hash: {str(oh)[:8]}... -> {str(nh)[:8]}...")
-                        else:
-                            display_details_list.append("(Quick Compare)")
-                    else: 
-                        display_details_list.append("Folder metadata/content changed")
-                else: # Added or Deleted
-                    display_name = item_data['item_name']
-                    display_rel_path = item_data['relative_path']
-                    if item_data['is_file']:
-                        display_details_list.append(f"Size: {item_data.get('size', 'N/A')}")
-                        if not is_quick_mode or cat_name == "Deleted": # Deleted items always show stored hash
-                            h = item_data.get('content_hash', 'N/A')
+                        else: display_details_list.append("(Quick Compare)")
+                    else: display_details_list.append("Folder metadata/content changed")
+                else: 
+                    display_name = item_data_raw['item_name']
+                    display_rel_path = item_data_raw['relative_path']
+                    is_file_for_role = item_data_raw.get('is_file', True)
+                    if item_data_raw['is_file']:
+                        display_details_list.append(f"Size: {item_data_raw.get('size', 'N/A')}")
+                        if not is_quick_mode or cat_name == "Deleted": 
+                            h = item_data_raw.get('content_hash', 'N/A')
                             if h and not str(h).startswith("ERROR") and h != "NOT_HASHED_QUICK_COMPARE" and h != "CANCELLED_HASH_LIVE":
                                 display_details_list.append(f"Hash: {str(h)[:8]}...")
                             elif h == "NOT_HASHED_QUICK_COMPARE" and is_quick_mode and cat_name == "Added":
                                 display_details_list.append("Hash: (Quick Compare)")
-                            elif h: # Show error/cancelled hash
-                                 display_details_list.append(f"Hash: {h}")
+                            elif h: display_details_list.append(f"Hash: {h}")
                         elif is_quick_mode and cat_name == "Added":
                              display_details_list.append("Hash: (Quick Compare)")
 
-
                 details_str = "; ".join(display_details_list) if display_details_list else "N/A"
-                QTreeWidgetItem(cat_item, ["", display_name, display_rel_path, details_str])
+                tree_list_item = QTreeWidgetItem(cat_item, ["", display_name, display_rel_path, details_str])
+                tree_list_item.setData(0, self.ITEM_DATA_ROLE, item_dict_for_role) 
+                tree_list_item.setData(0, self.ITEM_TYPE_ROLE, 'file' if is_file_for_role else 'folder')
+
+
             self.results_tree.expandItem(cat_item)
         for i in range(self.results_tree.columnCount()):
             self.results_tree.resizeColumnToContents(i)
@@ -330,7 +476,6 @@ class MainWindow(QMainWindow):
     def on_operation_error(self, error_message):
         if "cancelled" in error_message.lower() or "cancel requested" in error_message.lower():
              self.status_label.setText(f"Operation Cancelled.")
-             # QMessageBox.information(self, "Operation Cancelled", error_message) # Can be noisy
         else:
             self.status_label.setText(f"Error: {error_message}")
             QMessageBox.critical(self, "Operation Error", error_message)
@@ -354,7 +499,7 @@ class MainWindow(QMainWindow):
                isinstance(child_widget, QListWidget) or \
                isinstance(child_widget, QComboBox) or \
                isinstance(child_widget, QLineEdit) or \
-               isinstance(child_widget, QCheckBox): # Include checkbox
+               isinstance(child_widget, QCheckBox): 
                 if child_widget == self.cancel_button:
                     child_widget.setVisible(is_running) 
                     child_widget.setEnabled(is_running) 
