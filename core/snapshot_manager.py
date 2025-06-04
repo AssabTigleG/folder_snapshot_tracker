@@ -52,40 +52,41 @@ class SnapshotWorker(QThread):
     def run(self):
         try:
             snapshot_items_for_db = []
-            files_to_hash_map = {} 
+            files_to_hash_map = {}
 
-            # --- Estimation Phase ---
-            self.progress_updated.emit(0, 0, "Estimating work (can take time)...")
+            # Phase 1: Estimation
+            estimation_phase_msg = "Phase 1/3: Estimating work (can take time)"
+            self.progress_updated.emit(0, 0, estimation_phase_msg + "...")
             total_items_to_potentially_scan = 0
-            for root_idx, root_path in enumerate(self.root_folders):
+            for root_idx_est, root_path_est in enumerate(self.root_folders):
                 if self._is_cancellation_requested:
                     self.snapshot_error.emit("Operation cancelled during estimation.")
                     return
-                if root_path.is_dir():
+                if root_path_est.is_dir():
                     try:
-                        for dirpath, dirnames, filenames in os.walk(root_path):
+                        for _dirpath, dirnames, filenames in os.walk(root_path_est):
                             if self._is_cancellation_requested: break
                             total_items_to_potentially_scan += len(dirnames) + len(filenames)
-                            # Periodically update UI during long estimation
-                            if total_items_to_potentially_scan % 500 == 0:
-                                self.progress_updated.emit(root_idx + 1, len(self.root_folders), f"Estimating in {root_path.name} ({total_items_to_potentially_scan} items so far)...")
+                            if total_items_to_potentially_scan % 750 == 0: # Adjusted update frequency
+                                self.progress_updated.emit(root_idx_est + 1, len(self.root_folders), f"{estimation_phase_msg} (In {root_path_est.name} - {total_items_to_potentially_scan} items found so far)...")
                     except OSError: pass
-                if self._is_cancellation_requested: break # From outer loop
+                if self._is_cancellation_requested: break
             if self._is_cancellation_requested:
                 self.snapshot_error.emit("Operation cancelled after estimation.")
                 return
             
-            self.progress_updated.emit(0, total_items_to_potentially_scan, "Starting detailed scan...")
+            # Phase 2: Detailed Scan & Queuing
+            scan_phase_msg = "Phase 2/3: Scanning folders and queuing files for hashing"
+            self.progress_updated.emit(0, total_items_to_potentially_scan, scan_phase_msg + "...")
             processed_scan_items_count = 0
 
-            # --- Detailed Scan Phase ---
             for root_idx, root_folder_path in enumerate(self.root_folders):
                 if self._is_cancellation_requested:
                     self.snapshot_error.emit("Operation cancelled during folder scan.")
                     return
                 self.current_root_for_item = root_folder_path
                 if not root_folder_path.is_dir():
-                    self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"Skipping non-dir: {root_folder_path}")
+                    self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"{scan_phase_msg} (Skipping non-dir: {root_folder_path})")
                     continue
 
                 for dirpath, dirnames_orig, filenames in os.walk(root_folder_path, topdown=True):
@@ -97,51 +98,50 @@ class SnapshotWorker(QThread):
                         dirname = dirnames_mutable[i]
                         dir_full_path_obj = Path(dirpath) / dirname
                         if self._is_ignored(dirname, dir_full_path_obj, True):
-                            del dirnames_mutable[i] 
-                            if i < len(dirnames_orig): del dirnames_orig[i]
+                            del dirnames_mutable[i]
+                            if i < len(dirnames_orig): del dirnames_orig[i] # Ensure os.walk respects ignore for subdirs
                         processed_scan_items_count += 1
-                        if processed_scan_items_count % 100 == 0:
-                            self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"Scanning: {dir_full_path_obj.name}")
+                        if processed_scan_items_count % 200 == 0: # Adjusted update frequency
+                            self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"{scan_phase_msg} (Dir: {dir_full_path_obj.name})")
                     if self._is_cancellation_requested: break
 
                     current_dir_path = Path(dirpath)
-                    for dirname in dirnames_mutable: 
+                    for dirname in dirnames_mutable:
                         if self._is_cancellation_requested: break
                         full_path_obj = current_dir_path / dirname
-                        # ... (add dir to snapshot_items_for_db as before) ...
                         try:
                             stat_info = full_path_obj.stat(follow_symlinks=False)
                             snapshot_items_for_db.append({
                                 'root_folder_idx': root_idx, 'relative_path': full_path_obj.relative_to(root_folder_path).as_posix(),
-                                'item_name': dirname, 'is_file': False, 'size': None, 
+                                'item_name': dirname, 'is_file': False, 'size': None,
                                 'lmt': stat_info.st_mtime, 'ct': stat_info.st_ctime, 'content_hash': None
                             })
-                        except OSError: pass # Log error if needed
-                        # processed_scan_items_count already updated for dirs
-
+                        except OSError: pass
+                    
                     for filename in filenames:
                         if self._is_cancellation_requested: break
                         full_path_obj = current_dir_path / filename
                         processed_scan_items_count += 1
                         if self._is_ignored(filename, full_path_obj, False) or full_path_obj.is_symlink():
-                            if processed_scan_items_count % 100 == 0:
-                                self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"Scanning/Skipping: {filename}")
+                            if processed_scan_items_count % 200 == 0:
+                                self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"{scan_phase_msg} (Skipping: {filename})")
                             continue
                         files_to_hash_map[str(full_path_obj)] = (root_idx, full_path_obj.relative_to(root_folder_path).as_posix(), filename)
                         if processed_scan_items_count % 100 == 0:
-                             self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"Queued for hash: {filename}")
+                             self.progress_updated.emit(processed_scan_items_count, total_items_to_potentially_scan, f"{scan_phase_msg} (Queued hash: {filename})")
                     if self._is_cancellation_requested: break
-                if self._is_cancellation_requested: break 
+                if self._is_cancellation_requested: break
             if self._is_cancellation_requested:
                 self.snapshot_error.emit("Operation cancelled before hashing.")
                 return
 
-            # --- Hashing Phase ---
+            # Phase 3: Hashing
             paths_to_hash_list = list(files_to_hash_map.keys())
-            path_hashes = {} 
+            path_hashes = {}
             actual_files_to_hash_count = len(paths_to_hash_list)
             hashed_files_count = 0
-            self.progress_updated.emit(0, actual_files_to_hash_count, "Starting file hashing...")
+            hashing_phase_msg = "Phase 3/3: Hashing files"
+            self.progress_updated.emit(0, actual_files_to_hash_count, hashing_phase_msg + "...")
 
             if paths_to_hash_list:
                 self.process_pool_executor = ProcessPoolExecutor(max_workers=os.cpu_count() or 1)
@@ -152,15 +152,14 @@ class SnapshotWorker(QThread):
                     }
                     for future in as_completed(future_to_path):
                         original_path_str = future_to_path[future]
-                        if self._is_cancellation_requested: # Check before .result()
-                            # Cancel remaining futures more proactively
-                            for f_key in future_to_path: # future_to_path.keys() is futures
+                        if self._is_cancellation_requested:
+                            for f_key in future_to_path:
                                 if not f_key.done() and not f_key.cancelled():
                                     f_key.cancel()
                             self.snapshot_error.emit("Operation cancelled during hashing.")
-                            return 
+                            return
                         try:
-                            file_hash = future.result() 
+                            file_hash = future.result()
                             path_hashes[original_path_str] = file_hash
                         except CancelledError:
                             path_hashes[original_path_str] = "CANCELLED_HASH"
@@ -168,60 +167,62 @@ class SnapshotWorker(QThread):
                             path_hashes[original_path_str] = "ERROR_HASHING_FUTURE"
                         
                         hashed_files_count +=1
-                        self.progress_updated.emit(hashed_files_count, actual_files_to_hash_count, f"Hashed: {Path(original_path_str).name}")
-                except Exception as e: 
-                    if not self._is_cancellation_requested: 
-                        self.snapshot_error.emit(f"Error during hashing process: {e}")
-                    return 
-                finally: # Ensure executor is cleaned up if hashing block is exited
+                        self.progress_updated.emit(hashed_files_count, actual_files_to_hash_count, f"{hashing_phase_msg} ({Path(original_path_str).name})")
+                except Exception as e:
+                    if not self._is_cancellation_requested:
+                        self.snapshot_error.emit(f"Error during hashing process setup: {e}")
+                    return
+                finally:
                     if self.process_pool_executor:
-                        try: self.process_pool_executor.shutdown(wait=False, cancel_futures=True) # cancel_futures for good measure
+                        try: self.process_pool_executor.shutdown(wait=False, cancel_futures=True)
                         except TypeError: self.process_pool_executor.shutdown(wait=False)
                         except Exception: pass
                         self.process_pool_executor = None
             
-            if self._is_cancellation_requested: 
+            if self._is_cancellation_requested:
                 self.snapshot_error.emit("Operation cancelled after hashing attempt.")
                 return
 
-            # --- Populate and Save ---
+            # Finalizing
             self.progress_updated.emit(0,0, "Finalizing snapshot data...")
             for abs_path_str, (root_idx, rel_path_str, item_name) in files_to_hash_map.items():
                 if self._is_cancellation_requested: break
                 try:
-                    stat_info = Path(abs_path_str).stat(follow_symlinks=False) 
+                    stat_info = Path(abs_path_str).stat(follow_symlinks=False)
                     snapshot_items_for_db.append({
                         'root_folder_idx': root_idx, 'relative_path': rel_path_str,
                         'item_name': item_name, 'is_file': True, 'size': stat_info.st_size,
                         'lmt': stat_info.st_mtime, 'ct': stat_info.st_ctime,
                         'content_hash': path_hashes.get(abs_path_str)
                     })
-                except OSError: pass 
+                except OSError: pass
             if self._is_cancellation_requested:
                 self.snapshot_error.emit("Operation cancelled before saving to database.")
                 return
 
-            if not snapshot_items_for_db and not self.root_folders:
-                 self.snapshot_error.emit("No folders selected or no items found to snapshot (after ignores).")
+            if not snapshot_items_for_db and not any(rf.is_dir() for rf in self.root_folders): # Check if any root folders are actual dirs
+                 # This condition might be too strict if root_folders can be files. Assuming they are dirs.
+                 self.snapshot_error.emit("No valid folders selected or no items found to snapshot (after ignores).")
                  return
-            if not snapshot_items_for_db and self.root_folders: 
-                 self.progress_updated.emit(0,0, "Warning: No items to snapshot (empty or all ignored).")
-
+            if not snapshot_items_for_db and any(rf.is_dir() for rf in self.root_folders):
+                 self.progress_updated.emit(0,0, "Warning: No items to snapshot (folders might be empty or all items ignored).")
+            
             snapshot_id = self.db_manager.add_snapshot_record(
-                self.snapshot_name, datetime.datetime.now().isoformat(), [str(p) for p in self.root_folders] 
+                self.snapshot_name, datetime.datetime.now().isoformat(), [str(p) for p in self.root_folders]
             )
-            if snapshot_items_for_db:
+            if snapshot_items_for_db: # Only insert if there's data
                 self.db_manager.batch_insert_snapshot_items(snapshot_id, snapshot_items_for_db)
             
             self.snapshot_complete.emit(snapshot_id, self.snapshot_name)
 
-        except Exception as e: 
-            if not self._is_cancellation_requested: # Avoid double error if already handled
-                 self.snapshot_error.emit(f"Unexpected error in snapshot worker: {e}")
-            # import traceback; traceback.print_exc() # For debugging
+        except Exception as e:
+            if not self._is_cancellation_requested:
+                # import traceback # For debugging
+                # self.snapshot_error.emit(f"Unexpected error: {e}\n{traceback.format_exc()}")
+                self.snapshot_error.emit(f"Unexpected error in snapshot worker: {e}")
         finally:
-            if self.process_pool_executor: # Final cleanup
-                try: self.process_pool_executor.shutdown(wait=True, cancel_futures=True) # Wait here ensures cleanup before thread exits
+            if self.process_pool_executor:
+                try: self.process_pool_executor.shutdown(wait=True, cancel_futures=True)
                 except TypeError: self.process_pool_executor.shutdown(wait=True)
                 except Exception: pass
                 self.process_pool_executor = None
