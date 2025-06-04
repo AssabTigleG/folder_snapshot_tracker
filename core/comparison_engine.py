@@ -14,17 +14,24 @@ class ComparisonWorker(QThread):
     comparison_complete = pyqtSignal(dict) 
     comparison_error = pyqtSignal(str)
 
-    def __init__(self, snapshot_id_to_compare: int,
+    def __init__(self,
+                 snapshot_id_A: int,
+                 snapshot_id_B: Optional[int] = None, # For snapshot vs snapshot
+                 comparison_mode: str = "live_vs_snapshot", # "live_vs_snapshot" or "snapshot_vs_snapshot"
                  ignore_patterns: Optional[List[str]] = None,
                  quick_compare: bool = False,
                  trust_metadata_for_unchanged_files: bool = False):
         super().__init__()
-        self.snapshot_id = snapshot_id_to_compare
+        self.snapshot_id_A = snapshot_id_A
+        self.snapshot_id_B = snapshot_id_B
+        self.comparison_mode = comparison_mode # "live_vs_snapshot" or "snapshot_vs_snapshot"
         self.db_manager = DatabaseManager()
         self.ignore_patterns = ignore_patterns or []
         self.quick_compare = quick_compare
+        # trust_metadata is primarily for live_vs_snapshot. Its direct applicability to snap_vs_snap is limited
+        # as hashes are already stored. We'll consider its effect if LMT/size match in snap-vs-snap.
         self.trust_metadata_for_unchanged_files = trust_metadata_for_unchanged_files
-        self.current_root_for_item: Optional[Path] = None
+        self.current_root_for_item: Optional[Path] = None # Used in live scan
         self._is_cancellation_requested = False
         self.live_scan_executor: Optional[ProcessPoolExecutor] = None 
 
@@ -238,124 +245,149 @@ class ComparisonWorker(QThread):
     def run(self):
         try:
             self.comparison_progress.emit(0, 0, "Initializing comparison...")
-            all_snapshots = self.db_manager.get_all_snapshots()
-            target_snapshot_info = next((s for s in all_snapshots if s['id'] == self.snapshot_id), None)
+            all_db_snapshots = self.db_manager.get_all_snapshots() # Get all once for efficiency
 
-            if not target_snapshot_info:
-                self.comparison_error.emit(f"Snapshot with ID {self.snapshot_id} not found.")
+            # --- Data Acquisition Phase ---
+            if self.comparison_mode == "live_vs_snapshot":
+                target_snapshot_info = next((s for s in all_db_snapshots if s['id'] == self.snapshot_id_A), None)
+                if not target_snapshot_info:
+                    self.comparison_error.emit(f"Snapshot A (ID {self.snapshot_id_A}) not found.")
+                    return
+                if self._is_cancellation_requested: self.comparison_error.emit("Cancelled before loading Snapshot A."); return
+
+                root_folders_for_snapshot = target_snapshot_info['root_folders']
+                self.comparison_progress.emit(0, 0, "Phase 1/4: Loading Snapshot A data...")
+                snapshot_A_items_list = self.db_manager.get_snapshot_items(self.snapshot_id_A)
+                if self._is_cancellation_requested: self.comparison_error.emit("Cancelled while loading Snapshot A."); return
+                
+                stored_data = {(item['root_folder_idx'], item['relative_path']): item for item in snapshot_A_items_list}
+                
+                stored_data_map_for_scan = None
+                if not self.quick_compare and self.trust_metadata_for_unchanged_files:
+                    stored_data_map_for_scan = stored_data # Pass this to live scan
+
+                # _scan_live_folder_state emits its own internal phase messages (e.g., Estimating, Scanning, Hashing)
+                # These become overall Phase 2/4, 3/4 depending on hashing
+                live_items_list = self._scan_live_folder_state(root_folders_for_snapshot, stored_data_map=stored_data_map_for_scan)
+                if self._is_cancellation_requested or live_items_list is None:
+                    self.comparison_error.emit("Operation cancelled during live folder scan.")
+                    return
+                
+                data_from_A = stored_data
+                data_from_B = {(item['root_folder_idx'], item['relative_path']): item for item in live_items_list}
+                analysis_phase_prefix = "Phase 4/4" if not self.quick_compare else "Phase 3/3"
+
+            elif self.comparison_mode == "snapshot_vs_snapshot":
+                if self.snapshot_id_B is None:
+                    self.comparison_error.emit("Snapshot B ID is missing for snapshot vs. snapshot comparison.")
+                    return
+
+                snapshot_A_info = next((s for s in all_db_snapshots if s['id'] == self.snapshot_id_A), None)
+                snapshot_B_info = next((s for s in all_db_snapshots if s['id'] == self.snapshot_id_B), None)
+
+                if not snapshot_A_info:
+                    self.comparison_error.emit(f"Snapshot A (ID {self.snapshot_id_A}) not found.")
+                    return
+                if not snapshot_B_info:
+                    self.comparison_error.emit(f"Snapshot B (ID {self.snapshot_id_B}) not found.")
+                    return
+                if self._is_cancellation_requested: self.comparison_error.emit("Cancelled before loading snapshots."); return
+                
+                # Check for root folder compatibility (optional, but good for meaningful comparison)
+                # For now, we assume users know if comparison is meaningful.
+
+                self.comparison_progress.emit(0, 0, "Phase 1/3: Loading Snapshot A data...")
+                snapshot_A_items = self.db_manager.get_snapshot_items(self.snapshot_id_A)
+                if self._is_cancellation_requested: self.comparison_error.emit("Cancelled while loading Snapshot A."); return
+                
+                self.comparison_progress.emit(0, 0, "Phase 2/3: Loading Snapshot B data...")
+                snapshot_B_items = self.db_manager.get_snapshot_items(self.snapshot_id_B)
+                if self._is_cancellation_requested: self.comparison_error.emit("Cancelled while loading Snapshot B."); return
+
+                data_from_A = {(item['root_folder_idx'], item['relative_path']): item for item in snapshot_A_items}
+                data_from_B = {(item['root_folder_idx'], item['relative_path']): item for item in snapshot_B_items}
+                analysis_phase_prefix = "Phase 3/3"
+            else:
+                self.comparison_error.emit(f"Unknown comparison mode: {self.comparison_mode}")
                 return
-            if self._is_cancellation_requested:
-                self.comparison_error.emit("Operation cancelled before starting.")
-                return
 
-            root_folders_for_snapshot = target_snapshot_info['root_folders']
+            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled before analysis."); return
 
-            # Load stored data earlier if trust_metadata_for_unchanged_files is active for full compare
-            stored_data_map_for_scan = None
-            self.comparison_progress.emit(0, 0, "Loading stored snapshot data...")
-            stored_items_list = self.db_manager.get_snapshot_items(self.snapshot_id)
-            if self._is_cancellation_requested:
-                self.comparison_error.emit("Operation cancelled while loading stored snapshot.")
-                return
-            
-            stored_data = {(item['root_folder_idx'], item['relative_path']): item for item in stored_items_list}
+            # --- Analysis Phase ---
+            keys_A = set(data_from_A.keys())
+            keys_B = set(data_from_B.keys())
 
-            if not self.quick_compare and self.trust_metadata_for_unchanged_files:
-                stored_data_map_for_scan = stored_data
-            
-            # _scan_live_folder_state will emit its own phased progress
-            live_items_list = self._scan_live_folder_state(root_folders_for_snapshot, stored_data_map=stored_data_map_for_scan)
-
-            if self._is_cancellation_requested or live_items_list is None:
-                self.comparison_error.emit("Operation cancelled during live folder scan.")
-                return
-            
-            if self._is_cancellation_requested: # Double check after scan
-                self.comparison_error.emit("Operation cancelled after live scan, before data processing.")
-                return
-
-            live_data = {(item['root_folder_idx'], item['relative_path']): item for item in live_items_list}
-
-            stored_keys = set(stored_data.keys())
-            live_keys = set(live_data.keys())
-
-            added_keys = live_keys - stored_keys
-            deleted_keys = stored_keys - live_keys
-            common_keys = stored_keys.intersection(live_keys)
+            # Items in B but not in A are "added" relative to A
+            added_keys = keys_B - keys_A
+            # Items in A but not in B are "deleted" relative to A
+            deleted_keys = keys_A - keys_B
+            common_keys = keys_A.intersection(keys_B)
 
             results = {'added': [], 'deleted': [], 'modified': []}
             
             total_comparisons = len(added_keys) + len(deleted_keys) + len(common_keys)
             processed_comparisons = 0
-            # If it's not a quick compare, it implies a potential hashing phase (Phase 3), making analysis Phase 4.
-            # If trust_metadata_for_unchanged_files is true, hashing might be skipped for some/all files,
-            # but the _scan_live_folder_state itself still constitutes up to 3 phases internally if hashing occurs.
-            # Thus, analysis is the final phase.
-            is_full_compare_mode = not self.quick_compare
-            # The _scan_live_folder_state has 3 internal phases if hashing is involved, or 2 if not.
-            # If full compare (potentially with hashing), then analysis is the 4th overall phase.
-            # If quick compare (no hashing), then analysis is the 3rd overall phase.
-            if is_full_compare_mode: # Implies potential for hashing phase
-                analysis_phase_msg = "Phase 4/4: Analyzing differences"
-            else: # Quick compare, no hashing phase
-                analysis_phase_msg = "Phase 3/3: Analyzing differences"
+            analysis_phase_msg = f"{analysis_phase_prefix}: Analyzing differences"
             self.comparison_progress.emit(0, total_comparisons, analysis_phase_msg + "...")
 
             for key_idx, key in enumerate(added_keys):
                 if self._is_cancellation_requested: break
-                results['added'].append(live_data[key])
+                results['added'].append(data_from_B[key])
                 processed_comparisons +=1
-                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Added: {live_data[key]['item_name']})")
-            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during added item processing."); return
+                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Found in B, not A: {data_from_B[key]['item_name']})")
+            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during 'added' item processing."); return
 
             for key_idx, key in enumerate(deleted_keys):
                 if self._is_cancellation_requested: break
-                results['deleted'].append(stored_data[key])
+                results['deleted'].append(data_from_A[key])
                 processed_comparisons +=1
-                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Deleted: {stored_data[key]['item_name']})")
-            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during deleted item processing."); return
+                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Found in A, not B: {data_from_A[key]['item_name']})")
+            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during 'deleted' item processing."); return
 
             for key_idx, key in enumerate(common_keys):
                 if self._is_cancellation_requested: break
-                item_stored = stored_data[key]
-                item_live = live_data[key]
+                item_A = data_from_A[key]
+                item_B = data_from_B[key]
                 modified = False
                 
-                if item_stored['is_file'] != item_live['is_file']:
-                    modified = True
-                elif item_stored['is_file']: # Both are files
+                if item_A['is_file'] != item_B['is_file']:
+                    modified = True # Type changed (file vs folder)
+                elif item_A['is_file']: # Both are files
+                    # LMT and Size comparison
+                    lmt_differs = abs(item_A.get('lmt', 0) - item_B.get('lmt', 0)) > 1e-6
+                    size_differs = item_A.get('size') != item_B.get('size')
+
                     if self.quick_compare:
-                        # abs() for LMT comparison due to potential float precision issues
-                        if abs(item_stored.get('lmt', 0) - item_live.get('lmt', 0)) > 1e-6 or \
-                           item_stored.get('size') != item_live.get('size'):
+                        if lmt_differs or size_differs:
                             modified = True
-                    else: # Full comparison
-                        if abs(item_stored.get('lmt', 0) - item_live.get('lmt', 0)) > 1e-6 or \
-                           item_stored.get('size') != item_live.get('size'):
-                            modified = True
-                        else:
-                            # LMT and Size match.
-                            # If self.trust_metadata_for_unchanged_files was true AND metadata matched,
-                            # item_live['content_hash'] would have been copied from item_stored['content_hash'].
-                            # So, hash comparison is mainly for cases where LMT/Size match but content might have changed
-                            # without metadata update, OR if trust_metadata_for_unchanged_files is false.
-                            sh1 = item_stored.get('content_hash')
-                            sh2 = item_live.get('content_hash')
+                    else: # Full compare (hash-based)
+                        if lmt_differs or size_differs:
+                            modified = True # Modified by metadata even in full compare
+                        
+                        # If metadata matches, or if modified status is still false, check hash
+                        # In "snapshot_vs_snapshot", trust_metadata_for_unchanged_files might mean if LMT/size match, we don't flag as modified by hash
+                        # if the hashes themselves were "trusted" (i.e. copied). But here, we have actual stored hashes.
+                        if not modified or (modified and self.comparison_mode == "snapshot_vs_snapshot"): # always check hash if not quick_compare for snap_vs_snap
+                            hash_A = item_A.get('content_hash')
+                            hash_B = item_B.get('content_hash')
 
-                            valid_sh1 = isinstance(sh1, str) and not sh1.startswith("ERROR") and sh1 != "NOT_HASHED_QUICK_COMPARE" and sh1 != "CANCELLED_HASH_LIVE" and sh1 != "ERROR_TRUSTED_HASH_MISSING"
-                            valid_sh2 = isinstance(sh2, str) and not sh2.startswith("ERROR") and sh2 != "NOT_HASHED_QUICK_COMPARE" and sh2 != "CANCELLED_HASH_LIVE" and sh2 != "ERROR_TRUSTED_HASH_MISSING"
+                            # Define valid hashes (not error states or placeholders)
+                            valid_hash_A = isinstance(hash_A, str) and not hash_A.startswith("ERROR") and hash_A not in ["NOT_HASHED_QUICK_COMPARE", "CANCELLED_HASH_LIVE", "ERROR_TRUSTED_HASH_MISSING", None]
+                            valid_hash_B = isinstance(hash_B, str) and not hash_B.startswith("ERROR") and hash_B not in ["NOT_HASHED_QUICK_COMPARE", "CANCELLED_HASH_LIVE", "ERROR_TRUSTED_HASH_MISSING", None]
 
-                            if valid_sh1 and valid_sh2:
-                                if sh1 != sh2:
+                            if valid_hash_A and valid_hash_B:
+                                if hash_A != hash_B:
                                     modified = True
-                            elif valid_sh1 != valid_sh2: # XOR: one is valid/good, the other is not
-                                modified = True # Treat as modified if one hash is problematic and the other isn't
-                            # If both hashes are problematic (e.g., ERROR_HASHING), and LMT/Size matched, not modified by this rule.
+                            elif valid_hash_A != valid_hash_B: # One is valid, the other is not (e.g. hashing error in one snapshot)
+                                modified = True # Treat as modified due to hash discrepancy/problem
+                            # If both hashes are problematic and metadata matched, not modified by this specific hash rule.
+                            # If metadata already marked as modified, this hash check is for completeness of the 'new' record.
+                # For folders, we don't compare content directly; presence/absence or type change is enough.
                 
-                if modified: results['modified'].append({'old': item_stored, 'new': item_live})
+                if modified: results['modified'].append({'old': item_A, 'new': item_B})
                 processed_comparisons +=1
-                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Common: {item_live['item_name']})")
-            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during modified item processing."); return
+                if key_idx % 75 == 0 : self.comparison_progress.emit(processed_comparisons, total_comparisons, f"{analysis_phase_msg} (Common: {item_B['item_name']})")
+            if self._is_cancellation_requested: self.comparison_error.emit("Cancelled during 'modified' item processing."); return
             
             self.comparison_complete.emit(results)
 
@@ -365,7 +397,7 @@ class ComparisonWorker(QThread):
                 # self.comparison_error.emit(f"Unexpected error: {e}\n{traceback.format_exc()}")
                 self.comparison_error.emit(f"Unexpected error in comparison worker: {e}")
         finally:
-            if self.live_scan_executor:
+            if self.live_scan_executor: # Only used in live_vs_snapshot mode
                 try:
                     if hasattr(self.live_scan_executor, 'shutdown') and callable(getattr(self.live_scan_executor, 'shutdown')):
                         try: self.live_scan_executor.shutdown(wait=True, cancel_futures=True)
