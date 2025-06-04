@@ -448,31 +448,31 @@ class MainWindow(QMainWindow):
         if not isinstance(item_data_role_value, dict):
             return None
 
-        # Section 1: Determine the root path for the current tab's tree.
         current_tab_root_path_str = getattr(tree_widget, "root_path_str", None)
         if not isinstance(current_tab_root_path_str, str) or not current_tab_root_path_str:
             return None
         
         base_path = Path(current_tab_root_path_str)
 
-        # Section 2: Determine the correct item properties dictionary.
-        parent_category_text = item.parent().text(0) if item.parent() else ""
+        parent_category_text = ""
+        if item.parent():
+            parent_category_text = item.parent().text(0) 
         
         target_item_properties: Optional[Dict[str, Any]] = None
-        if parent_category_text == "Modified":
+        if parent_category_text.startswith("Δ Modified"): 
             new_item_dict = item_data_role_value.get('new')
             old_item_dict = item_data_role_value.get('old')
             if isinstance(new_item_dict, dict):
                 target_item_properties = new_item_dict
             elif isinstance(old_item_dict, dict): 
                 target_item_properties = old_item_dict
-        elif parent_category_text in ["Added", "Deleted"]:
+        elif parent_category_text.startswith("⊕ Added") or \
+             parent_category_text.startswith("⊖ Deleted"): 
             target_item_properties = item_data_role_value
         
         if not isinstance(target_item_properties, dict):
             return None
 
-        # Section 3: Get the relative path string from the item's properties.
         relative_path_str = target_item_properties.get('relative_path')
         
         if not isinstance(relative_path_str, str) or relative_path_str == "": 
@@ -481,7 +481,6 @@ class MainWindow(QMainWindow):
             else: 
                 return None
         
-        # Section 4: Construct and return the full path.
         final_path = base_path / relative_path_str
         return final_path
 
@@ -494,48 +493,48 @@ class MainWindow(QMainWindow):
         item = active_tree.itemAt(position)
         if not item:
             return
-        if item.data(0, self.ITEM_TYPE_ROLE) == 'category':
+        
+        item_type_role = item.data(0, self.ITEM_TYPE_ROLE)
+        if item_type_role == 'category':
             return
         
         full_path = self._get_full_path_for_tree_item(item, active_tree)
-        # Removed debug print for full_path here, as it was confirmed to be working.
 
-        parent_text = item.parent().text(0) if item.parent() else ""
+        parent_text = ""
+        if item.parent():
+            parent_text = item.parent().text(0) # This is "⊕ Added (N)", "Δ Modified (N)", etc.
+
         item_data_dict = item.data(0, self.ITEM_DATA_ROLE)
-        
-        # Ensure item_data_dict is a dictionary before proceeding
         if not isinstance(item_data_dict, dict):
-            return # Or handle error appropriately
+            return 
 
         check_item = item_data_dict
-        if parent_text == "Modified": 
-            check_item = item_data_dict.get('new', item_data_dict.get('old', {})) # Ensure fallback is a dict
+        if parent_text.startswith("Δ Modified"): 
+            check_item = item_data_dict.get('new', item_data_dict.get('old', {}))
         
-        # Ensure check_item is a dictionary
         if not isinstance(check_item, dict):
-            return # Or handle error
+            return
 
-        item_is_file = check_item.get('is_file', True) # Default to True if key missing
-        item_logically_exists = (parent_text == "Added") or (parent_text == "Modified")
+        item_is_file = check_item.get('is_file', True) 
+        item_logically_exists = parent_text.startswith("⊕ Added") or parent_text.startswith("Δ Modified")
 
         menu = QMenu(self)
         if full_path: # full_path should be a Path object or None
-            # The lambda now accepts 'checked' (or '_') to consume the boolean from the signal
             menu.addAction(QAction(f"Copy Full Path: {str(full_path)[:50]}...", self, 
                                    triggered=lambda checked=False, p=full_path: self.copy_item_path(p)))
             
             open_container_path = None
             if item_logically_exists:
                 open_container_path = full_path.parent if item_is_file else full_path
-            elif parent_text == "Deleted": # Item doesn't exist, so its parent might.
+            elif parent_text.startswith("⊖ Deleted"): 
                 open_container_path = full_path.parent
             
-            if open_container_path: # open_container_path should be a Path object
+            if open_container_path: 
                 is_snap_vs_snap = (self.comparison_tabs.currentIndex() == 1)
                 menu.addAction(QAction("Open Containing Folder", self, 
                                        triggered=lambda checked=False, p=open_container_path, snap_context=is_snap_vs_snap: self.open_item_location(p, is_snap_vs_snap_context=snap_context)))
             
-            if item_logically_exists and item_is_file: # full_path should be a Path object
+            if item_logically_exists and item_is_file: 
                  is_snap_vs_snap = (self.comparison_tabs.currentIndex() == 1)
                  menu.addAction(QAction("Open File", self, 
                                         triggered=lambda checked=False, p=full_path, snap_context=is_snap_vs_snap: self.open_item_location(p, is_snap_vs_snap_context=snap_context)))
@@ -749,39 +748,136 @@ class MainWindow(QMainWindow):
 
     def _create_new_results_tree_for_tab(self) -> QTreeWidget:
         tree = QTreeWidget()
-        tree.setColumnCount(4)
-        tree.setHeaderLabels(["Status", "Name", "Relative Path", "Details"])
+        tree.setColumnCount(5)
+        tree.setHeaderLabels(["Status", "Type", "Name", "Relative Path", "Details"])
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tree.customContextMenuRequested.connect(self.show_results_tree_context_menu)
-        tree.setAlternatingRowColors(True) # ApexUI touch
-        tree.setStyleSheet("QTreeWidget { border: 1px solid #444; } QHeaderView::section { background-color: #3a3a3a; color: #eee; padding: 4px; border: 1px solid #555; }")
+        tree.setAlternatingRowColors(True)
+        
+        # ApexUI: Enhanced Styling for modern look and feel
+        tree.setStyleSheet("""
+            QTreeWidget {
+                background-color: #2b2b2b;
+                color: #dcdcdc;
+                border: 1px solid #3c3c3c;
+                font-size: 9pt;
+                alternate-background-color: #313131;
+            }
+            QTreeWidget::item {
+                padding: 5px 2px; /* Vertical padding, minimal horizontal */
+                border-bottom: 1px dotted #383838; /* Subtle separator */
+            }
+            QTreeWidget::item:hover {
+                background-color: #3a4c5f; /* Modern hover color */
+            }
+            QTreeWidget::item:selected {
+                background-color: #4a6380; /* Modern selection color */
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #222222;
+                color: #e0e0e0;
+                padding: 5px;
+                border: 1px solid #3c3c3c;
+                font-weight: bold;
+                font-size: 9pt;
+            }
+            QTreeWidget::branch {
+                /* Could add custom branch indicators if desired */
+            }
+        """)
+        
+        # Set fixed widths for icon-heavy columns
+        tree.setColumnWidth(0, 60)  # Status (glyph + padding)
+        tree.setColumnWidth(1, 50)  # Type (icon + padding)
+        tree.setColumnWidth(2, 250) # Name (can be resized by user)
+        tree.setColumnWidth(3, 350) # Relative Path (can be resized by user)
+        # Details column will take remaining space or can be resized
+
+        tree.setIndentation(15) # Adjust indentation for child items
         return tree
 
     def _populate_tree_with_data(self, tree_widget: QTreeWidget, data: Dict[str, List], is_quick: bool, trust_meta_active: bool):
-        categories = {"Added": data.get('added', []), "Deleted": data.get('deleted', []), "Modified": data.get('modified', [])}
-        for cat_name, items in categories.items():
-            if not items: continue # Skip empty categories for this root
-            cat_item = QTreeWidgetItem(tree_widget, [cat_name, f"({len(items)} items)"])
+        from PyQt6.QtGui import QColor, QBrush, QIcon
+        from PyQt6.QtWidgets import QApplication, QStyle
+
+        categories_map = {
+            "Added": ("⊕ Added", QColor("#50fa7b"), data.get('added', [])),      # Greenish
+            "Modified": ("Δ Modified", QColor("#ffb86c"), data.get('modified', [])), # Orangish
+            "Deleted": ("⊖ Deleted", QColor("#ff5555"), data.get('deleted', []))    # Reddish
+        }
+
+        file_icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        dir_icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+
+        for cat_display_name, cat_color, items in categories_map.values():
+            if not items: continue
+            
+            cat_item = QTreeWidgetItem(tree_widget, [f"{cat_display_name} ({len(items)})"])
             cat_item.setData(0, self.ITEM_TYPE_ROLE, 'category')
+            cat_item.setForeground(0, QBrush(cat_color.lighter(110))) # Slightly lighter for category header
+            # cat_item.setFont(0, QFont("...", -1, QFont.Weight.Bold)) # Optional: Bold category
+
             for item_data in items:
-                item_info = item_data.get('new', item_data) if cat_name == "Modified" or cat_name == "Added" else item_data
-                old_item_info = item_data.get('old') if cat_name == "Modified" else None
+                status_glyph = cat_display_name.split(" ")[0] # "⊕", "Δ", or "⊖"
+                
+                item_info = item_data
+                old_item_info = None
+                if cat_display_name.startswith("Δ Modified"): # Modified
+                    item_info = item_data.get('new', {})
+                    old_item_info = item_data.get('old', {})
+                elif cat_display_name.startswith("⊕ Added"): # Added
+                    item_info = item_data
+                elif cat_display_name.startswith("⊖ Deleted"): # Deleted
+                    item_info = item_data
+
+                if not item_info : continue # Should not happen with valid data
+
                 details_list = []
-                if cat_name == "Modified":
-                    if item_info['is_file'] != old_item_info['is_file']: details_list.append("Type changed")
-                    elif item_info['is_file']:
-                        if abs(item_info.get('lmt',0) - old_item_info.get('lmt',0)) > 1e-6 : details_list.append("LMT changed")
-                        if item_info.get('size') != old_item_info.get('size'): details_list.append(f"Size: {self._format_size(old_item_info.get('size'))} -> {self._format_size(item_info.get('size'))}")
-                        if is_quick: details_list.append("(Quick Compare)")
-                elif item_info.get('is_file'):
-                    details_list.append(f"Size: {self._format_size(item_info.get('size'))}")
-                    h_status = item_info.get('content_hash')
-                    if is_quick and isinstance(h_status, str) and "QUICK_COMPARE" in h_status : details_list.append("(Quick Compare)")
-                tree_item = QTreeWidgetItem(cat_item, ["", item_info['item_name'], item_info['relative_path'], "; ".join(d for d in details_list if d) or "N/A"])
-                tree_item.setData(0, self.ITEM_DATA_ROLE, item_data)
+                item_type_icon = dir_icon if not item_info.get('is_file') else file_icon
+
+                if cat_display_name.startswith("Δ Modified"):
+                    if old_item_info.get('is_file') != item_info.get('is_file'):
+                        details_list.append(f"Type: {'Folder' if old_item_info.get('is_file') == False else 'File'} ➔ {'Folder' if item_info.get('is_file') == False else 'File'}")
+                    
+                    if item_info.get('is_file'): # Only show size/lmt for files
+                        if abs(item_info.get('lmt', 0) - old_item_info.get('lmt', 0)) > 1e-6:
+                            details_list.append("Timestamp changed")
+                        if item_info.get('size') != old_item_info.get('size'):
+                            details_list.append(f"Size: {self._format_size(old_item_info.get('size',0))} ➔ {self._format_size(item_info.get('size',0))}")
+                        
+                        # Hash check for full compare (non-quick)
+                        if not is_quick and item_info.get('content_hash') != old_item_info.get('content_hash'):
+                             # Avoid showing if one hash is an error/placeholder, unless explicitly desired
+                             if isinstance(item_info.get('content_hash'), str) and isinstance(old_item_info.get('content_hash'), str) \
+                                and not item_info.get('content_hash', "").startswith("ERROR") \
+                                and not old_item_info.get('content_hash', "").startswith("ERROR") \
+                                and "QUICK_COMPARE" not in item_info.get('content_hash', "") \
+                                and "QUICK_COMPARE" not in old_item_info.get('content_hash', ""):
+                                details_list.append("Content changed (hash)")
+                
+                elif item_info.get('is_file'): # Added or Deleted files
+                    details_list.append(f"Size: {self._format_size(item_info.get('size',0))}")
+
+                if is_quick and item_info.get('is_file'): details_list.append("(Quick Compare)")
+                elif trust_meta_active and item_info.get('is_file'): details_list.append("(Trusted Meta Used)")
+
+
+                tree_item_texts = [
+                    status_glyph,                                  # Status
+                    "",                                            # Type (icon only)
+                    item_info.get('item_name', 'N/A'),             # Name
+                    item_info.get('relative_path', 'N/A'),         # Relative Path
+                    "; ".join(d for d in details_list if d) or "N/A" # Details
+                ]
+                tree_item = QTreeWidgetItem(cat_item, tree_item_texts)
+                tree_item.setData(0, self.ITEM_DATA_ROLE, item_data) # Store original full data
                 tree_item.setData(0, self.ITEM_TYPE_ROLE, 'file' if item_info.get('is_file') else 'folder')
+
+                tree_item.setForeground(0, QBrush(cat_color)) # Color for status glyph
+                tree_item.setIcon(1, item_type_icon)          # Icon for type
+
             tree_widget.expandItem(cat_item)
-        # No global resize here, do it after all tabs are added for the initially visible one.
 
 
     def on_operation_error(self, error_message): # Same
