@@ -8,5 +8,6 @@
         "node_modules/",
         "yahoo",
         ".git/"
-    ]
+    ],
+    "snapshot_root_folders": []
 }

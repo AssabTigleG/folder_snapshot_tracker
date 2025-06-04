@@ -34,9 +34,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Folder Snapshot & Change Tracker")
         self.setGeometry(100, 100, 1200, 800)
 
+        super().__init__()
+        self.setWindowTitle("Folder Snapshot & Change Tracker")
+        self.setGeometry(100, 100, 1200, 800)
+
         self.db_manager = DatabaseManager()
         self.config_manager = ConfigManager()
-        self.selected_folders_for_snapshot = []
+        
+        # Load previously selected folders from config
+        self.selected_folders_for_snapshot = self.config_manager.get_snapshot_root_folders()
+
         self.snapshot_worker: Optional[SnapshotWorker] = None
         self.comparison_worker: Optional[ComparisonWorker] = None
         
@@ -45,6 +52,19 @@ class MainWindow(QMainWindow):
         
         # This will store QTreeWidget instances, keyed by root folder path string
         self.per_root_folder_trees: Dict[str, QTreeWidget] = {}
+
+
+        self._create_menu_bar()
+        self.init_ui()
+        
+        # Populate the folder list widget with loaded folders
+        self.folder_list_widget.addItems(self.selected_folders_for_snapshot)
+
+        self.load_snapshots_into_all_combos()
+        self._update_trust_metadata_checkbox_state()
+
+    def _create_menu_bar(self):
+        menu_bar = self.menuBar()
 
 
         self._create_menu_bar()
@@ -584,19 +604,40 @@ class MainWindow(QMainWindow):
             else: subprocess.run(['xdg-open', str(effective_path)], check=False)
         except Exception as e: QMessageBox.warning(self, "Error Opening", f"Could not open '{path}': {e}")
 
-    def add_folder(self): # Same
+    def add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-        if folder and folder not in self.selected_folders_for_snapshot:
-            self.selected_folders_for_snapshot.append(folder)
-            self.folder_list_widget.addItem(folder)
+        if folder: # Check if a folder was actually selected
+            folder_path = str(Path(folder).resolve()) # Get absolute and resolved path string
+            if folder_path not in self.selected_folders_for_snapshot:
+                self.selected_folders_for_snapshot.append(folder_path)
+                self.folder_list_widget.addItem(folder_path)
+                # Save the updated list to config
+                self.config_manager.set_snapshot_root_folders(self.selected_folders_for_snapshot)
 
-    def remove_selected_folders(self): # Same
-        for item in self.folder_list_widget.selectedItems():
-            self.selected_folders_for_snapshot.remove(item.text())
-            self.folder_list_widget.takeItem(self.folder_list_widget.row(item))
+    def remove_selected_folders(self):
+        selected_items = self.folder_list_widget.selectedItems()
+        if not selected_items:
+            return # Nothing selected to remove
 
-    def clear_all_folders(self): # Same
-        self.selected_folders_for_snapshot.clear(); self.folder_list_widget.clear()
+        # Iterate through selected items and remove from list and widget
+        items_to_remove_text = [item.text() for item in selected_items]
+        for item_text in items_to_remove_text:
+             if item_text in self.selected_folders_for_snapshot: # Double check presence
+                self.selected_folders_for_snapshot.remove(item_text)
+        
+        # Remove from QListWidget (iterate backwards to avoid index issues)
+        for item in reversed(selected_items):
+             row = self.folder_list_widget.row(item)
+             self.folder_list_widget.takeItem(row)
+
+        # Save the updated list to config
+        self.config_manager.set_snapshot_root_folders(self.selected_folders_for_snapshot)
+
+    def clear_all_folders(self):
+        self.selected_folders_for_snapshot.clear()
+        self.folder_list_widget.clear()
+        # Save the updated list to config (which is now empty)
+        self.config_manager.set_snapshot_root_folders(self.selected_folders_for_snapshot)
 
     def load_snapshots_into_all_combos(self): # Same
         combos = [self.live_compare_snapshot_combo, self.snapshot_a_combo, self.snapshot_b_combo, self.delete_snapshot_combo]
