@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QComboBox, QFileDialog, QMessageBox, QTreeWidget,
     QTreeWidgetItem, QLineEdit, QLabel, QProgressBar, QAbstractItemView,
     QMenuBar, QCheckBox, QMenu, QTabWidget, QGroupBox, QFormLayout,
-    QSizePolicy
+    QSizePolicy, QApplication # Added QApplication
 )
 from PyQt6.QtCore import Qt, QUrl, QPoint
 from PyQt6.QtGui import QAction, QGuiApplication
@@ -539,7 +539,29 @@ class MainWindow(QMainWindow):
                  menu.addAction(QAction("Open File", self, 
                                         triggered=lambda checked=False, p=full_path, snap_context=is_snap_vs_snap: self.open_item_location(p, is_snap_vs_snap_context=snap_context)))
         
-        if menu.actions(): 
+        # --- Add "Purge Selected Item(s) from Disk..." action ---
+        selected_items = active_tree.selectedItems()
+        purge_action_enabled = False
+        if selected_items:
+            # Enable if at least one selected item is NOT in a "Deleted" category.
+            # And ensure the item itself isn't a category header.
+            for sel_item in selected_items:
+                sel_item_type_role = sel_item.data(0, self.ITEM_TYPE_ROLE)
+                if sel_item_type_role != 'category':
+                    sel_parent_text = sel_item.parent().text(0) if sel_item.parent() else ""
+                    if not sel_parent_text.startswith("⊖ Deleted"):
+                        purge_action_enabled = True
+                        break 
+        
+        if purge_action_enabled: # Only add if there's something selectable and eligible
+            if menu.actions(): # Add a separator if other actions exist
+                menu.addSeparator()
+            purge_action = QAction("Purge Selected Item(s) from Disk...", self)
+            purge_action.triggered.connect(lambda checked=False, tree=active_tree: self._handle_purge_selected_items(tree))
+            menu.addAction(purge_action)
+        # --- End Purge Action ---
+
+        if menu.actions():
             menu.exec(active_tree.mapToGlobal(position))
 
 
@@ -752,6 +774,7 @@ class MainWindow(QMainWindow):
         tree.setHeaderLabels(["Status", "Type", "Name", "Relative Path", "Details"])
         tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tree.customContextMenuRequested.connect(self.show_results_tree_context_menu)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection) # Enable multi-selection
         tree.setAlternatingRowColors(True)
         
         # ApexUI: Enhanced Styling for modern look and feel
@@ -914,3 +937,127 @@ class MainWindow(QMainWindow):
         if self.snapshot_worker and self.snapshot_worker.isRunning(): self.snapshot_worker.request_cancellation(); self.snapshot_worker.wait(300)
         if self.comparison_worker and self.comparison_worker.isRunning(): self.comparison_worker.request_cancellation(); self.comparison_worker.wait(300)
         super().closeEvent(event)
+
+    def _handle_purge_selected_items(self, tree_widget: QTreeWidget):
+        selected_tree_items = tree_widget.selectedItems()
+        if not selected_tree_items:
+            QMessageBox.information(self, "No Selection", "No items selected for deletion.")
+            return
+
+        items_to_delete_info = [] # List of tuples: (QTreeWidgetItem, Path, is_file, item_name)
+        
+        for item_widget in selected_tree_items:
+            item_type_role = item_widget.data(0, self.ITEM_TYPE_ROLE)
+            if item_type_role == 'category':
+                continue 
+
+            parent_item = item_widget.parent()
+            if parent_item:
+                parent_category_text = parent_item.text(0) 
+                if parent_category_text.startswith("⊖ Deleted"):
+                    continue 
+
+            full_path = self._get_full_path_for_tree_item(item_widget, tree_widget)
+            if not full_path:
+                self.status_label.setText(f"Warning: Could not resolve path for {item_widget.text(2)}. Skipping.")
+                continue
+
+            is_file = (item_type_role == 'file')
+            item_name = item_widget.text(2) 
+            
+            items_to_delete_info.append((item_widget, full_path, is_file, item_name))
+
+        if not items_to_delete_info:
+            QMessageBox.information(self, "No Eligible Items", "Selected items are not eligible for deletion (e.g., already deleted or category headers).")
+            return
+
+        num_files = sum(1 for _, _, is_file, _ in items_to_delete_info if is_file)
+        num_folders = sum(1 for _, _, is_file, _ in items_to_delete_info if not is_file)
+        
+        confirmation_message = f"You are about to PERMANENTLY delete:\n"
+        confirmation_message += f"- {num_files} file(s)\n"
+        confirmation_message += f"- {num_folders} folder(s)\n\n"
+        
+        if len(items_to_delete_info) <= 10:
+            confirmation_message += "Items to be deleted:\n"
+            for _, path_obj, _, name in items_to_delete_info:
+                confirmation_message += f"- {name} (at {path_obj.parent})\n"
+        confirmation_message += "\nThis action CANNOT be undone. Are you sure?"
+
+        reply = QMessageBox.warning(self, "Confirm Permanent Deletion", confirmation_message,
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.No:
+            self.status_label.setText("Deletion cancelled by user.")
+            return
+
+        self.status_label.setText(f"Attempting to purge {len(items_to_delete_info)} item(s)...")
+        QApplication.processEvents() 
+
+        successfully_deleted_widgets = []
+        errors_occurred = []
+        
+        parents_potentially_needing_count_update = [] 
+
+        for item_widget, path_obj, is_file, item_name in items_to_delete_info:
+            try:
+                if not path_obj.exists(): 
+                    self.status_label.setText(f"Item '{item_name}' no longer exists at '{path_obj}'. Skipping.")
+                    successfully_deleted_widgets.append(item_widget) 
+                    if item_widget.parent():
+                        # Corrected this line: use .append() with the list
+                        parents_potentially_needing_count_update.append(item_widget.parent()) 
+                    continue
+
+                if is_file:
+                    os.remove(path_obj)
+                else: 
+                    shutil.rmtree(path_obj)
+                
+                successfully_deleted_widgets.append(item_widget)
+                if item_widget.parent():
+                    parents_potentially_needing_count_update.append(item_widget.parent())
+
+            except (OSError, IOError, PermissionError) as e:
+                errors_occurred.append(f"Error deleting '{item_name}' ({path_obj}): {e}")
+            except Exception as e: 
+                errors_occurred.append(f"Unexpected error deleting '{item_name}' ({path_obj}): {e}")
+
+        for item_widget in successfully_deleted_widgets:
+            parent = item_widget.parent()
+            if parent:
+                parent.removeChild(item_widget)
+            else: 
+                index = tree_widget.indexOfTopLevelItem(item_widget)
+                if index != -1:
+                    tree_widget.takeTopLevelItem(index)
+        
+        unique_parents_to_update = []
+        for p_widget in parents_potentially_needing_count_update:
+            if p_widget not in unique_parents_to_update: 
+                unique_parents_to_update.append(p_widget)
+
+        for parent_item_widget in unique_parents_to_update:
+            if parent_item_widget: 
+                try:
+                    current_text = parent_item_widget.text(0) 
+                    base_text = current_text.split(" (")[0]   
+                    new_count = parent_item_widget.childCount()
+                    parent_item_widget.setText(0, f"{base_text} ({new_count})")
+                except RuntimeError: 
+                    pass 
+
+        final_status_parts = []
+        if successfully_deleted_widgets:
+            final_status_parts.append(f"{len(successfully_deleted_widgets)} item(s) purged.")
+        if errors_occurred:
+            final_status_parts.append(f"{len(errors_occurred)} error(s) occurred.")
+            QMessageBox.critical(self, "Deletion Errors", "Some errors occurred during deletion:\n\n" + "\n".join(errors_occurred))
+        
+        if not final_status_parts: 
+            self.status_label.setText("Deletion process completed (no items processed or all skipped).")
+        else:
+            self.status_label.setText(" ".join(final_status_parts))
+        
+        # Note: Global summary counts are not updated here as it would require a rescan/re-compare.
