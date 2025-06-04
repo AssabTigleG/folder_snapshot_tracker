@@ -439,89 +439,118 @@ class MainWindow(QMainWindow):
             self._on_selected_snapshot_changed_for_comparison(b_idx, "B", self.snapshot_b_combo)
 
     def _get_full_path_for_tree_item(self, item: QTreeWidgetItem, tree_widget: QTreeWidget) -> Optional[Path]:
-        item_data = item.data(0, self.ITEM_DATA_ROLE)
-        if not item_data or item.data(0, self.ITEM_TYPE_ROLE) == 'category': return None
+        item_data_role_value = item.data(0, self.ITEM_DATA_ROLE)
+        item_type_role_value = item.data(0, self.ITEM_TYPE_ROLE)
 
-        # Find the tab page QWidget that is the parent of tree_widget
-        tab_page_widget = tree_widget.parentWidget() # This assumes tree is direct child of tab page
-        if not tab_page_widget: return None
-
-        tab_index = self.results_tab_widget.indexOf(tab_page_widget)
-        if tab_index == -1: return None # Should not happen if tree_widget is from a tab
-
-        # Retrieve the root path associated with this tab
-        # The root path was stored using setTabData when the tab was created.
-        # However, QTabWidget.setTabData is for arbitrary QVariant. Storing root path with tree directly is better.
-        # Let's assume tree_widget has a property 'root_path_str' set when created.
-        root_path_str = getattr(tree_widget, "root_path_str", None)
-        if not root_path_str:
-            # Fallback: try to get from tab data if we stored it there (less ideal)
-            # For this to work, on_comparison_complete would need to use self.results_tab_widget.setTabData(tab_idx, root_path)
-             root_path_qvariant = self.results_tab_widget.tabData(tab_index)
-             if root_path_qvariant: root_path_str = str(root_path_qvariant)
-
-        if not root_path_str: return None # Cannot determine root path for this tree
-
-        base_path = Path(root_path_str)
+        if item_type_role_value == 'category':
+            return None
         
-        parent_text = item.parent().text(0) if item.parent() else ""
-        actual_item_info = item_data
-        if parent_text == "Modified":
-            actual_item_info = item_data.get('new', item_data.get('old'))
-        elif parent_text == "Added":
-            actual_item_info = item_data # This is the 'new' item
-        elif parent_text == "Deleted":
-            actual_item_info = item_data # This is the 'old' item
-        
-        if not actual_item_info: return None
-        # root_folder_idx is now relative to the *list of roots for the whole comparison*,
-        # but since this tree is specific to ONE root, the relative_path is what matters here from that root.
-        relative_path_str = actual_item_info.get('relative_path')
+        if not isinstance(item_data_role_value, dict):
+            return None
 
-        if relative_path_str is not None:
-            # The base_path is already the specific root for this tab.
-            # The item's relative_path is relative to *some* root_folder_idx from the original list.
-            # If the item indeed belongs to `base_path` (its root_folder_idx pointed to this base_path), then this is correct.
-            # The filtering in on_comparison_complete should ensure this.
-            return base_path / relative_path_str
-        return None
+        # Section 1: Determine the root path for the current tab's tree.
+        current_tab_root_path_str = getattr(tree_widget, "root_path_str", None)
+        if not isinstance(current_tab_root_path_str, str) or not current_tab_root_path_str:
+            return None
+        
+        base_path = Path(current_tab_root_path_str)
+
+        # Section 2: Determine the correct item properties dictionary.
+        parent_category_text = item.parent().text(0) if item.parent() else ""
+        
+        target_item_properties: Optional[Dict[str, Any]] = None
+        if parent_category_text == "Modified":
+            new_item_dict = item_data_role_value.get('new')
+            old_item_dict = item_data_role_value.get('old')
+            if isinstance(new_item_dict, dict):
+                target_item_properties = new_item_dict
+            elif isinstance(old_item_dict, dict): 
+                target_item_properties = old_item_dict
+        elif parent_category_text in ["Added", "Deleted"]:
+            target_item_properties = item_data_role_value
+        
+        if not isinstance(target_item_properties, dict):
+            return None
+
+        # Section 3: Get the relative path string from the item's properties.
+        relative_path_str = target_item_properties.get('relative_path')
+        
+        if not isinstance(relative_path_str, str) or relative_path_str == "": 
+            if relative_path_str == ".":
+                pass
+            else: 
+                return None
+        
+        # Section 4: Construct and return the full path.
+        final_path = base_path / relative_path_str
+        return final_path
 
 
     def show_results_tree_context_menu(self, position: QPoint): # Needs active tree
         active_tree = self._get_active_results_tree()
-        if not active_tree: return
+        if not active_tree: 
+            return
 
         item = active_tree.itemAt(position)
-        if not item or item.data(0, self.ITEM_TYPE_ROLE) == 'category': return
-
+        if not item:
+            return
+        if item.data(0, self.ITEM_TYPE_ROLE) == 'category':
+            return
+        
         full_path = self._get_full_path_for_tree_item(item, active_tree)
+        # Removed debug print for full_path here, as it was confirmed to be working.
+
         parent_text = item.parent().text(0) if item.parent() else ""
         item_data_dict = item.data(0, self.ITEM_DATA_ROLE)
+        
+        # Ensure item_data_dict is a dictionary before proceeding
+        if not isinstance(item_data_dict, dict):
+            return # Or handle error appropriately
+
         check_item = item_data_dict
-        if parent_text == "Modified": check_item = item_data_dict.get('new', item_data_dict.get('old'))
-        item_is_file = check_item.get('is_file', True)
+        if parent_text == "Modified": 
+            check_item = item_data_dict.get('new', item_data_dict.get('old', {})) # Ensure fallback is a dict
+        
+        # Ensure check_item is a dictionary
+        if not isinstance(check_item, dict):
+            return # Or handle error
+
+        item_is_file = check_item.get('is_file', True) # Default to True if key missing
         item_logically_exists = (parent_text == "Added") or (parent_text == "Modified")
 
         menu = QMenu(self)
-        if full_path:
-            menu.addAction(QAction(f"Copy Full Path: {str(full_path)[:50]}...", self, triggered=lambda: self.copy_item_path(full_path)))
+        if full_path: # full_path should be a Path object or None
+            # The lambda now accepts 'checked' (or '_') to consume the boolean from the signal
+            menu.addAction(QAction(f"Copy Full Path: {str(full_path)[:50]}...", self, 
+                                   triggered=lambda checked=False, p=full_path: self.copy_item_path(p)))
+            
             open_container_path = None
             if item_logically_exists:
                 open_container_path = full_path.parent if item_is_file else full_path
-            elif parent_text == "Deleted":
+            elif parent_text == "Deleted": # Item doesn't exist, so its parent might.
                 open_container_path = full_path.parent
-            if open_container_path:
-                menu.addAction(QAction("Open Containing Folder", self, triggered=lambda p=open_container_path: self.open_item_location(p, is_snap_vs_snap_context=(self.comparison_tabs.currentIndex()==1) )))
-            if item_logically_exists and item_is_file:
-                 menu.addAction(QAction("Open File", self, triggered=lambda p=full_path: self.open_item_location(p, is_snap_vs_snap_context=(self.comparison_tabs.currentIndex()==1))))
-        if menu.actions(): menu.exec(active_tree.mapToGlobal(position))
+            
+            if open_container_path: # open_container_path should be a Path object
+                is_snap_vs_snap = (self.comparison_tabs.currentIndex() == 1)
+                menu.addAction(QAction("Open Containing Folder", self, 
+                                       triggered=lambda checked=False, p=open_container_path, snap_context=is_snap_vs_snap: self.open_item_location(p, is_snap_vs_snap_context=snap_context)))
+            
+            if item_logically_exists and item_is_file: # full_path should be a Path object
+                 is_snap_vs_snap = (self.comparison_tabs.currentIndex() == 1)
+                 menu.addAction(QAction("Open File", self, 
+                                        triggered=lambda checked=False, p=full_path, snap_context=is_snap_vs_snap: self.open_item_location(p, is_snap_vs_snap_context=snap_context)))
+        
+        if menu.actions(): 
+            menu.exec(active_tree.mapToGlobal(position))
 
 
     def copy_item_path(self, path: Path): # Same
         if path: QGuiApplication.clipboard().setText(str(path)); self.status_label.setText(f"Path copied: {path}")
 
     def open_item_location(self, path: Path, is_snap_vs_snap_context: bool = False): # Same, added context
-        if not path: self.status_label.setText("Cannot open: Path is invalid."); return
+        if not path: 
+            self.status_label.setText("Cannot open: Invalid path provided.")
+            return
         try:
             effective_path = path
             if is_snap_vs_snap_context and not path.exists(): # For snap vs snap, path might not exist
