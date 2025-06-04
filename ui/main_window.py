@@ -690,15 +690,14 @@ class MainWindow(QMainWindow):
                     elif item_info['is_file']:
                         if abs(item_info.get('lmt',0) - old_item_info.get('lmt',0)) > 1e-6 : details_list.append("LMT changed")
                         if item_info.get('size') != old_item_info.get('size'): details_list.append(f"Size: {self._format_size(old_item_info.get('size'))} -> {self._format_size(item_info.get('size'))}")
-                        oh, nh = old_item_info.get('content_hash'), item_info.get('content_hash')
-                        if not is_quick and oh != nh and not (str(oh).startswith("ERROR") or str(nh).startswith("ERROR")):
-                            details_list.append(f"Hash: {str(oh)[:8]}... -> {str(nh)[:8]}...")
-                        elif is_quick: details_list.append("(Quick Compare)")
+                        # Removed hash comparison from details view
+                        if is_quick: details_list.append("(Quick Compare)")
                 elif item_info.get('is_file'):
                     details_list.append(f"Size: {self._format_size(item_info.get('size'))}")
-                    h = item_info.get('content_hash')
-                    if not is_quick and h and not str(h).startswith("ERROR") and "QUICK_COMPARE" not in str(h) and "TRUSTED_HASH_MISSING" not in str(h): details_list.append(f"Hash: {str(h)[:8]}...")
-                    elif is_quick and "QUICK_COMPARE" in str(h) : details_list.append("(Quick Compare)")
+                    # Removed hash display from details view
+                    h_status = item_info.get('content_hash')
+                    if is_quick and isinstance(h_status, str) and "QUICK_COMPARE" in h_status : details_list.append("(Quick Compare)")
+                
                 tree_item = QTreeWidgetItem(cat_item, ["", item_info['item_name'], item_info['relative_path'], "; ".join(d for d in details_list if d) or "N/A"])
                 tree_item.setData(0, self.ITEM_DATA_ROLE, item_data)
                 tree_item.setData(0, self.ITEM_TYPE_ROLE, 'file' if item_info.get('is_file') else 'folder')
